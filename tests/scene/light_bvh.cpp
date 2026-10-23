@@ -87,6 +87,51 @@ int main() {
     }
     require(partials > 0, "unchanged-size refits upload partially");
   }
+  // A vouched stable prefix (update's stablePrefix/prefixToken) changes
+  // nothing but the work: the same records as without it, also when the
+  // vouched set changes with its token.
+  {
+    std::mt19937 random(91);
+    const auto make = [&](uint64_t id, uint32_t triangle) {
+      SphereLight light;
+      light.id = id;
+      light.triangle = triangle;
+      light.radius = .3f;
+      for (unsigned c = 0; c < 3; ++c) {
+        light.position[c] = float(random() % 1000) / 10;
+        light.radiance[c] = 1 + float(random() % 10);
+        for (unsigned v = 0; v < 3; ++v)
+          light.corners[v][c] = light.position[c] + (v == c ? .5f : 0);
+      }
+      return light;
+    };
+    std::vector<SphereLight> prefix;
+    for (uint64_t i = 0; i < 300; ++i)
+      prefix.push_back(make(i * 7919 + 3, 1));
+    LightBvh hinted, plain;
+    uint64_t token = 1;
+    for (int frame = 0; frame < 400; ++frame) {
+      if (frame % 97 == 50) { // the vouched set changes: a new token
+        prefix[size_t(frame) % prefix.size()].radiance[1] += 1;
+        prefix.push_back(make(uint64_t(1) << 50 | uint64_t(frame), 1));
+        ++token;
+      }
+      auto lights = prefix;
+      for (int k = 0; k < 2 + frame % 3; ++k)
+        lights.push_back(make(uint64_t(1) << 40 | uint64_t(k), 0)); // spheres
+      for (int k = 0; k < frame % 5; ++k)
+        lights.push_back(make((uint64_t(1) << 41) + uint64_t(frame * 10 + k), 1)); // transient
+      lights[prefix.size()].position[0] += float(frame % 2); // a moving sphere
+      const bool a = hinted.update(lights, prefix.size(), frame % 37 == 0 ? 0 : token);
+      const bool b = plain.update(lights);
+      require(a == b && hinted.generation == plain.generation && hinted.lightingGeneration == plain.lightingGeneration &&
+                  hinted.emitters().size() == plain.emitters().size() && hinted.nodes().size() == plain.nodes().size() &&
+                  std::memcmp(hinted.emitters().data(), plain.emitters().data(),
+                              plain.emitters().size() * sizeof(LightEmitter)) == 0 &&
+                  std::memcmp(hinted.nodes().data(), plain.nodes().data(), plain.nodes().size() * sizeof(LightNode)) == 0,
+              "a vouched stable prefix produces the same hierarchy");
+    }
+  }
   // Sparse animation and input reordering must produce the same GPU records
   // as a fresh hierarchy, including when whole branches lose their power.
   {

@@ -1497,7 +1497,12 @@ namespace remix {
           addEmitter(emitter, filterEmission && emitter.animated);
           ++emitters;
         }
+    // The units' lights are those of the last update while the set's emitters
+    // and what shapes them (filtering, the emissive switch) are the same.
     const size_t sphereFirst = lights.size();
+    const uint64_t unitToken = unitEmitters && !filterEmission && options.emissiveLights
+                                   ? g.statics.emittingGeneration() * 2 + 1
+                                   : 0;
     if (options.torchLights) {
       const auto spheres = resources.sphereLights();
       lights.insert(lights.end(), spheres.begin(), spheres.end());
@@ -1518,7 +1523,7 @@ namespace remix {
       staged.emissive.update(std::move(emissive));
     }
     prep.lights = lights.size();
-    staged.combined.update(std::move(lights));
+    staged.combined.update(std::move(lights), sphereFirst, unitToken);
     staged.visibility = m_gpu->lightVisibility;
     staged.visibility.update(resources.visibilityPartition(), staged.combined,
                              options.lightVisibilityCulling && options.localLights, .1f / options.sceneScale);

@@ -61,8 +61,10 @@ namespace remix::scene {
     const std::vector<StaticUnit> &units() const { return m_units; }
     // Live units in trace order ((instanceId, instanceIndex) ascending).
     const std::vector<uint32_t> &order() const { return m_order; }
-    // Units with emitters, in trace order.
+    // Units with emitters, in trace order, and a count of the changes to them
+    // (any unit's emitters, or which units emit).
     const std::vector<uint32_t> &emitting() const { return m_emitting; }
+    uint64_t emittingGeneration() const { return m_emittingGeneration; }
     // Since the last acknowledge(): units built or rebuilt, units removed
     // (their slots and keys), and whether order() changed.
     const std::vector<uint32_t> &rebuilt() const { return m_rebuilt; }
@@ -128,6 +130,7 @@ namespace remix::scene {
 
     std::vector<StaticUnit> m_units;
     std::vector<uint32_t> m_free, m_freeing, m_order, m_rebuilt, m_emitting;
+    uint64_t m_emittingGeneration = 1;
     std::vector<Removed> m_removed;
     std::unordered_map<uint64_t, std::vector<uint32_t>> m_handles; // handle -> units by index
     std::unordered_map<std::pair<uint64_t, uint32_t>, uint32_t, KeyHash> m_keys; // (id, index) -> unit count

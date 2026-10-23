@@ -196,6 +196,7 @@ namespace remix::scene {
     if (m_orderDirty)
       sort();
     if (m_emittingDirty) {
+      ++m_emittingGeneration;
       m_emitting.clear();
       for (const uint32_t slot : m_order)
         if (!m_units[slot].emitters.empty())
@@ -259,6 +260,7 @@ namespace remix::scene {
     m_tracedUnits = m_tracedSurfaces = m_liveSurfaces = m_livePbr = 0;
     m_orderChanged = m_orderDirty = m_emittingDirty = false;
     m_emitting.clear();
+    ++m_emittingGeneration;
     m_partitionPending.clear();
     m_timelines.clear();
     m_prunable.clear();

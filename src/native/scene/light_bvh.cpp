@@ -63,7 +63,7 @@ namespace remix::scene {
     return ~0ull;
   }
 
-  bool LightBvh::update(std::vector<SphereLight> lights) {
+  bool LightBvh::update(std::vector<SphereLight> lights, size_t stablePrefix, uint64_t prefixToken) {
     const auto start = std::chrono::steady_clock::now();
     m_writtenEmitters.clear();
     m_writtenNodes.clear();
@@ -76,6 +76,14 @@ namespace remix::scene {
         buildTotalMilliseconds += buildMilliseconds = updateMilliseconds;
     };
     ++m_update;
+    // A vouched leading run of inputs: the same lights, at the same input
+    // positions, as in the last update.
+    const size_t stable = prefixToken && prefixToken == m_prefixToken && stablePrefix == m_prefixLength &&
+                                  stablePrefix <= lights.size() && stablePrefix <= m_sourceKeys.size()
+                              ? stablePrefix
+                              : 0;
+    m_prefixToken = prefixToken;
+    m_prefixLength = prefixToken ? stablePrefix : 0;
     // The order by type and identity (the input index breaks ties, so it is
     // the order a full sort makes). The leading run of inputs whose keys are
     // the last update's keeps its sorted order; only the rest is sorted and
@@ -84,11 +92,12 @@ namespace remix::scene {
     const auto less = [&](uint32_t a, uint32_t b) {
       return std::tie(lights[a].triangle, lights[a].id, a) < std::tie(lights[b].triangle, lights[b].id, b);
     };
-    size_t same = 0;
+    size_t same = stable;
     for (const size_t common = std::min(lights.size(), m_sourceKeys.size());
          same < common && m_sourceKeys[same] == std::pair{lights[same].id, lights[same].triangle};)
       ++same;
-    if (same != lights.size() || same != m_sourceKeys.size()) {
+    const bool reordered = same != lights.size() || same != m_sourceKeys.size();
+    if (reordered) {
       m_sourceKeys.resize(same);
       for (size_t i = same; i < lights.size(); ++i)
         m_sourceKeys.emplace_back(lights[i].id, lights[i].triangle);
@@ -135,7 +144,15 @@ namespace remix::scene {
         }
       }
     }
-    const bool unchanged = lights == m_sorted;
+    // With the order kept, a vouched light is where it was and as it was.
+    bool unchanged;
+    if (stable && !reordered && lights.size() == m_sorted.size()) {
+      unchanged = true;
+      for (size_t j = 0; unchanged && j < lights.size(); ++j)
+        unchanged = m_order[j] < stable || lights[j] == m_sorted[j];
+    } else {
+      unchanged = lights == m_sorted;
+    }
     if (unchanged && m_update < m_due) {
       finish();
       return false;
@@ -181,8 +198,10 @@ namespace remix::scene {
         while (in < lights.size() && keyOf(lights[in]) < key)
           extra.push_back(lights[in++]);
         if (in < lights.size() && keyOf(lights[in]) == key) {
+          // A vouched light that held its slot last update still holds it unchanged.
+          const bool vouched = m_order[in] < stable && m_present[slot];
           const auto &light = lights[in++];
-          if (!m_present[slot] || !(light == held)) {
+          if (!vouched && (!m_present[slot] || !(light == held))) {
             if (!sameGeometry(light, held)) {
               m_stamps[slot] = m_update;
               geometryChanged = true;

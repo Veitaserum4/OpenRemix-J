@@ -36,7 +36,12 @@ namespace remix::scene {
   // Without dynamic lights the hierarchy is the static part alone.
   class LightBvh {
   public:
-    bool update(std::vector<SphereLight> lights);
+    // stablePrefix, prefixToken: the caller vouches that the first stablePrefix
+    // inputs are the previous update's first stablePrefix inputs whenever
+    // prefixToken is nonzero and equals that update's token (the persistent
+    // static set's emitters, unchanged since). Their keys and contents are then
+    // not compared again.
+    bool update(std::vector<SphereLight> lights, size_t stablePrefix = 0, uint64_t prefixToken = 0);
     const std::vector<LightEmitter> &emitters() const { return m_emitters; }
     const std::vector<LightNode> &nodes() const { return m_nodes; }
     // The lights in emitter order: static slots (by type and identity, as
@@ -91,6 +96,8 @@ namespace remix::scene {
       std::vector<Range> emitters, nodes;
     };
     std::vector<Written> m_written;
+    uint64_t m_prefixToken = 0; // the last update's stablePrefix and prefixToken
+    size_t m_prefixLength = 0;
     std::vector<uint32_t> m_writtenEmitters, m_writtenNodes; // this update's writes
     bool m_writtenAll = false;
     void recordWritten();
