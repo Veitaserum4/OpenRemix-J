@@ -124,6 +124,11 @@ namespace remix {
       double tableMilliseconds = 0;             // within trace surfaces
       uint64_t validations = 0, mismatches = 0; // "persistentStaticValidation"
       char mismatch[128] = {};                  // the first mismatch found
+      // Scene preparation (prepareScene) besides the sync, and what the sync did.
+      uint64_t syncRebuiltUnits = 0, syncRemovedUnits = 0, resyncs = 0;
+      double viewModelMilliseconds = 0, frameMilliseconds = 0, opacityMilliseconds = 0;
+      double pruneMilliseconds = 0, lightingMilliseconds = 0;
+      uint64_t frameInstances = 0, frameSurfaces = 0, opacityProofs = 0, emitters = 0, lights = 0;
     };
     StaticStatistics staticStatistics() const;
     // Rebuilds the kept static tables from scratch every frame and compares.

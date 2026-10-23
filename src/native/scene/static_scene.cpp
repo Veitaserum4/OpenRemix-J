@@ -351,8 +351,14 @@ namespace remix::scene {
 
   TraceFrame prepareSceneFrame(NativeResources &resources, StaticScene *statics, OpacityCache &opacity,
                                WorkerPool *workers, bool opacityProfile, double seconds, bool filterEmission,
-                               SurfaceEmissionCache &emissionCache) {
+                               SurfaceEmissionCache &emissionCache, ScenePreparation *timing,
+                               bool mergeEmitters) {
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::time_point a, Clock::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
     bool units = statics && !opacityProfile && statics->sync(resources, opacity, emissionCache, workers);
+    const auto frameStart = Clock::now();
     if (units) {
       // Frame-local static instances would interleave with the set, and
       // colliding set keys make prepareTraceFrame reject the frame: trace
@@ -369,10 +375,14 @@ namespace remix::scene {
     frame.staticUnits = units;
     // The set's emitters join the frame's in trace order (the set's instances
     // are all static; keys never collide).
-    if (units && !statics->emitting().empty()) {
+    if (mergeEmitters && units && !statics->emitting().empty()) {
       std::vector<TraceFrame::Emitter> merged;
       const auto &emitting = statics->emitting();
       const auto &all = statics->units();
+      size_t count = frame.emitters.size();
+      for (const uint32_t slot : emitting)
+        count += all[slot].emitters.size();
+      merged.reserve(count);
       auto unitEmitters = [&](const StaticUnit &unit) {
         for (auto emitter : unit.emitters) {
           emitter.animated = filterEmission && emitter.animated;
@@ -398,6 +408,8 @@ namespace remix::scene {
         unitEmitters(all[emitting[next]]);
       frame.emitters = std::move(merged);
     }
+    const auto opacityStart = Clock::now();
+    uint64_t proofs = 0;
     // Coverage proof is CPU-only and can overlap the previous GPU submission.
     // Keep the result on this immutable frame, alongside its animated UVs.
     // Cached partitions are found on workers; the rest (new, revalidated or
@@ -414,8 +426,16 @@ namespace remix::scene {
     }
     for (auto instance : frame.instances)
       for (auto &surface : instance)
-        if (!surface.opacity)
+        if (!surface.opacity) {
           surface.opacity = opacity.partition(surface.draw, surface.uv);
+          ++proofs;
+        }
+    if (timing) {
+      const auto end = Clock::now();
+      timing->frameMilliseconds = ms(frameStart, opacityStart);
+      timing->opacityMilliseconds = ms(opacityStart, end);
+      timing->opacityProofs = proofs;
+    }
     return frame;
   }
 } // namespace remix::scene

@@ -92,6 +92,7 @@ namespace remix::scene {
     std::vector<SphereLight> m_sorted; // the last input, by type and identity
     std::vector<SphereLight> m_lights; // per emitter
     std::vector<SphereLight> m_temporalLights;
+    std::vector<double> m_temporalEnergy; // per snapshot light: what significance() weighs it with
     std::vector<LightEmitter> m_emitters;
     std::vector<LightNode> m_nodes;
     // Per emitter: the update its geometry last changed in (or it appeared).

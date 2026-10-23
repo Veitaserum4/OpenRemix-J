@@ -88,6 +88,11 @@ public:
       return busy->breakdown;
     return m_frameBreakdown;
   }
+  // The last completed frame's static set and scene preparation: while
+  // presenting asynchronously the render thread owns the current statistics.
+  const PathTracer::StaticStatistics &staticStatistics() const {
+    return m_asyncActive ? m_previousStatic : m_staticStatistics;
+  }
   // GPU pass timers ("rtx.native.gpuPassTimers"): the newest completed frame.
   const gpu::FrameTimings &gpuPassTimings() const {
     if (const auto *busy = busyState())

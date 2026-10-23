@@ -1367,10 +1367,17 @@ namespace remix {
       g.opacityCache.setOneSidedOpaque(options.hardwareFaceCulling);
       g.statics.invalidate();
     }
+    auto elapsed = [](Clock::time_point a, Clock::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    auto &prep = g.staticStatistics;
     // View models move into the world camera's view (Draw::viewModel) before
     // the tracer and the raster overlays see the frame's draws.
+    const auto viewModelStart = Clock::now();
     if (options.viewModel)
       resources.applyViewModel(options.viewModelScale);
+    prep.viewModelMilliseconds = elapsed(viewModelStart, Clock::now());
+    scene::ScenePreparation timing;
     Clock::time_point prepared{};
     scene::TraceFrame frame;
     if (profile) {
@@ -1382,11 +1389,25 @@ namespace remix {
           surface.opacity = g.opacityCache.partition(surface.draw, surface.uv);
     } else {
       frame = scene::prepareSceneFrame(resources, &g.statics, g.opacityCache, g.workers.get(), false, seconds,
-                                       filterEmission, g.surfaceEmissionCache);
+                                       filterEmission, g.surfaceEmissionCache, &timing, false);
     }
-    const auto classified = profile ? Clock::now() : Clock::time_point{};
+    const auto classified = Clock::now();
     m_gpu->opacityCache.prune();
-    const auto pruned = profile ? Clock::now() : Clock::time_point{};
+    const auto pruned = Clock::now();
+    {
+      const auto &sync = g.statics.statistics();
+      prep.syncRebuiltUnits = sync.rebuiltUnits;
+      prep.syncRemovedUnits = sync.removedUnits;
+      prep.resyncs = sync.resyncs;
+      prep.frameMilliseconds = timing.frameMilliseconds;
+      prep.opacityMilliseconds = timing.opacityMilliseconds;
+      prep.opacityProofs = timing.opacityProofs;
+      prep.pruneMilliseconds = elapsed(classified, pruned);
+      prep.frameInstances = frame.instances.size();
+      prep.frameSurfaces = 0;
+      for (const auto instance : frame.instances)
+        prep.frameSurfaces += instance.size();
+    }
     if (std::getenv("REMIX_OPACITY_DIAGNOSTICS")) {
       uint64_t reasons[scene::OpacityPartition::Count] = {}, mixed = 0;
       auto count = [&](const scene::TraceFrame::Surface &surface) {
@@ -1411,30 +1432,65 @@ namespace remix {
       std::fprintf(stderr, "\n");
     }
     auto &staged = frame.lighting;
-    staged.combined = m_gpu->lightBvh;
+    // The hierarchies move into the frame and back when it is committed
+    // (Gpu::prepare): a copy of every light, node and emitter each frame
+    // costs more than the update itself in emissive scenes. A frame that is
+    // dropped before its commit takes them along; the next one builds anew.
+    staged.combined = std::move(m_gpu->lightBvh);
     staged.history = m_gpu->emissionHistory;
     const auto mode = options.freezeEmissiveRadiance ? 2u : options.stabilizeEmissiveLighting ? 1u : 0u;
     staged.history.begin(resources.temporalEpoch().world, frame.seconds,
                          options.emissiveLights && options.localLights ? mode : 0u);
     const auto lightStart = Clock::now();
-    auto lights = options.torchLights ? resources.sphereLights() : std::vector<scene::SphereLight>{};
-    const auto sphereCount = lights.size();
-    for (const auto &source : frame.emitters) {
+    // The static set's emitters first (prepareSceneFrame left them in the
+    // units): the hierarchy keeps the sorted order of an unchanged leading
+    // run of its input, and these change only with the set. Then the sphere
+    // lights and the frame's own emitters.
+    const bool unitEmitters = !profile && frame.staticUnits;
+    std::vector<scene::SphereLight> lights;
+    if (unitEmitters) {
+      size_t count = 0;
+      for (const uint32_t slot : g.statics.emitting())
+        count += g.statics.units()[slot].emitters.size();
+      lights.reserve(count + frame.emitters.size() + 64);
+    }
+    uint64_t emitters = frame.emitters.size();
+    auto addEmitter = [&](const scene::TraceFrame::Emitter &source, bool animated) {
       auto light = source.light;
-      if (source.animated)
+      if (animated)
         staged.history.apply(light, source.layout);
       if (options.emissiveLights && light.radius > 1e-8f)
         lights.push_back(light);
+    };
+    if (unitEmitters)
+      for (const uint32_t slot : g.statics.emitting())
+        for (const auto &emitter : g.statics.units()[slot].emitters) {
+          // As prepareSceneFrame's merge: animated only when filtering, and
+          // then under the emitter's layout.
+          addEmitter(emitter, filterEmission && emitter.animated);
+          ++emitters;
+        }
+    const size_t sphereFirst = lights.size();
+    if (options.torchLights) {
+      const auto spheres = resources.sphereLights();
+      lights.insert(lights.end(), spheres.begin(), spheres.end());
     }
+    const size_t sphereEnd = lights.size();
+    for (const auto &source : frame.emitters)
+      addEmitter(source, source.animated);
     staged.history.end();
-    staged.hasEmissive = lights.size() > sphereCount;
+    staged.hasEmissive = lights.size() > sphereEnd - sphereFirst;
+    prep.emitters = emitters;
     // Per-family trees also for torch-only scenes: a split denoiser needs them.
     if (options.separateLocalLighting && options.separateLocalLighting != 3) {
       staged.torch = m_gpu->torchBvh;
       staged.emissive = m_gpu->emissiveBvh;
-      staged.torch.update({lights.begin(), lights.begin() + sphereCount});
-      staged.emissive.update({lights.begin() + sphereCount, lights.end()});
+      staged.torch.update({lights.begin() + sphereFirst, lights.begin() + sphereEnd});
+      std::vector<scene::SphereLight> emissive(lights.begin(), lights.begin() + sphereFirst);
+      emissive.insert(emissive.end(), lights.begin() + sphereEnd, lights.end());
+      staged.emissive.update(std::move(emissive));
     }
+    prep.lights = lights.size();
     staged.combined.update(std::move(lights));
     staged.visibility = m_gpu->lightVisibility;
     staged.visibility.update(resources.visibilityPartition(), staged.combined,
@@ -1442,6 +1498,7 @@ namespace remix {
     staged.emittingInstances = frame.emittingInstances;
     staged.dynamicEmittingInstances = frame.dynamicEmittingInstances;
     staged.updateMilliseconds = std::chrono::duration<double, std::milli>(Clock::now() - lightStart).count();
+    prep.lightingMilliseconds = staged.updateMilliseconds;
     if (profile) {
       const auto end = Clock::now();
       const auto count = m_gpu->opacityCache.takeStatistics();

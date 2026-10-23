@@ -691,6 +691,25 @@ typedef struct remixapi_FrameBreakdownEXT {
   uint64_t textureDescriptors, rasterSkinnedVertices, rasterUploadBytes, rasterCulledDraws;
 } remixapi_FrameBreakdownEXT;
 
+// CPU breakdown of the last traced frame's scene preparation
+// (FramePerformanceEXT.sceneMilliseconds): the persistent static set's sync,
+// the view-model move, the frame's draws into instances and emitters, their
+// opacity partitions (proofs: not found cached), the opacity cache prune and
+// the light hierarchies' update. staticActive: traced from the kept static
+// set. The sync's counts are units (re)built and removed this frame, and
+// resyncs (every unit rebuilt for a new epoch). Instances and surfaces are the
+// frame's own, outside the static set. Static tables are built during command
+// recording (FrameBreakdownEXT.traceSurfacesMilliseconds).
+typedef struct remixapi_ScenePreparationEXT {
+  uint32_t structSize, staticActive;
+  double staticSyncMilliseconds, viewModelMilliseconds, frameMilliseconds;
+  double opacityMilliseconds, pruneMilliseconds, lightingMilliseconds;
+  double staticTableMilliseconds;
+  uint64_t staticUnits, staticChanges, staticRebuiltUnits, staticRemovedUnits, staticResyncs;
+  uint64_t staticReusedSurfaces, staticRebuiltSurfaces;
+  uint64_t frameInstances, frameSurfaces, opacityProofs, emitters, lights;
+} remixapi_ScenePreparationEXT;
+
 // GPU pass timings of the newest completed frame, while the
 // "rtx.native.gpuPassTimers" setting is on (available is 0 otherwise). A frame
 // is one command buffer on one queue (queueFamily). Every pass is a range of
@@ -1121,6 +1140,8 @@ typedef remixapi_ErrorCode (REMIXAPI_PTR *PFN_remixapi_GetFramePerformanceEXT)(r
 REMIXAPI remixapi_ErrorCode REMIXAPI_CALL remixapi_GetFramePerformanceEXT(remixapi_FramePerformanceEXT* statistics);
 typedef remixapi_ErrorCode (REMIXAPI_PTR *PFN_remixapi_GetFrameBreakdownEXT)(remixapi_FrameBreakdownEXT* statistics);
 REMIXAPI remixapi_ErrorCode REMIXAPI_CALL remixapi_GetFrameBreakdownEXT(remixapi_FrameBreakdownEXT* statistics);
+typedef remixapi_ErrorCode (REMIXAPI_PTR *PFN_remixapi_GetScenePreparationEXT)(remixapi_ScenePreparationEXT* statistics);
+REMIXAPI remixapi_ErrorCode REMIXAPI_CALL remixapi_GetScenePreparationEXT(remixapi_ScenePreparationEXT* statistics);
 typedef remixapi_ErrorCode (REMIXAPI_PTR *PFN_remixapi_GetGpuPassTimingsEXT)(remixapi_GpuPassTimingsEXT* timings);
 REMIXAPI remixapi_ErrorCode REMIXAPI_CALL remixapi_GetGpuPassTimingsEXT(remixapi_GpuPassTimingsEXT* timings);
 typedef remixapi_ErrorCode (REMIXAPI_PTR *PFN_remixapi_GetDenoisingCapabilitiesEXT)(remixapi_DenoisingCapabilitiesEXT* capabilities);

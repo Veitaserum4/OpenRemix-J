@@ -3,7 +3,9 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <iterator>
 #include <numeric>
+#include <tuple>
 
 namespace remix::scene {
   namespace {
@@ -71,19 +73,32 @@ namespace remix::scene {
         buildTotalMilliseconds += buildMilliseconds = updateMilliseconds;
     };
     ++m_update;
-    bool orderChanged = lights.size() != m_sourceKeys.size();
-    for (size_t i = 0; !orderChanged && i < lights.size(); ++i)
-      orderChanged = m_sourceKeys[i] != std::pair{lights[i].id, lights[i].triangle};
-    if (orderChanged) {
-      m_sourceKeys.clear();
-      for (const auto &light : lights)
-        m_sourceKeys.emplace_back(light.id, light.triangle);
-      m_order.resize(lights.size());
-      std::iota(m_order.begin(), m_order.end(), 0u);
-      std::sort(m_order.begin(), m_order.end(), [&](uint32_t a, uint32_t b) {
-        return lights[a].triangle != lights[b].triangle ? lights[a].triangle < lights[b].triangle
-                                                        : lights[a].id < lights[b].id;
-      });
+    // The order by type and identity (the input index breaks ties, so it is
+    // the order a full sort makes). The leading run of inputs whose keys are
+    // the last update's keeps its sorted order; only the rest is sorted and
+    // merged in. Hosts that submit a large stable set first (the persistent
+    // static set's emitters) pay for the few lights that come and go.
+    const auto less = [&](uint32_t a, uint32_t b) {
+      return std::tie(lights[a].triangle, lights[a].id, a) < std::tie(lights[b].triangle, lights[b].id, b);
+    };
+    size_t same = 0;
+    for (const size_t common = std::min(lights.size(), m_sourceKeys.size());
+         same < common && m_sourceKeys[same] == std::pair{lights[same].id, lights[same].triangle};)
+      ++same;
+    if (same != lights.size() || same != m_sourceKeys.size()) {
+      m_sourceKeys.resize(same);
+      for (size_t i = same; i < lights.size(); ++i)
+        m_sourceKeys.emplace_back(lights[i].id, lights[i].triangle);
+      std::vector<uint32_t> kept, added(lights.size() - same);
+      kept.reserve(same);
+      for (const uint32_t i : m_order)
+        if (i < same)
+          kept.push_back(i);
+      std::iota(added.begin(), added.end(), uint32_t(same));
+      std::sort(added.begin(), added.end(), less);
+      m_order.clear();
+      m_order.reserve(lights.size());
+      std::merge(kept.begin(), kept.end(), added.begin(), added.end(), std::back_inserter(m_order), less);
     }
     std::vector<SphereLight> ordered;
     ordered.reserve(lights.size());
@@ -313,11 +328,24 @@ namespace remix::scene {
     const auto energy = [](const SphereLight &light) {
       return (double(light.radiance[0]) + light.radiance[1] + light.radiance[2]) * powerScale(light);
     };
+    // The snapshot keeps its lights' energies, and a light that is the same
+    // as in the snapshot (most of them, in a large static set) reuses its
+    // own: triangle areas are not measured again every update.
+    std::vector<double> energies(sorted.size());
     size_t a = 0, b = 0;
     while (a < sorted.size() || b < before.size()) {
       if (a < sorted.size() && b < before.size() && keyOf(sorted[a]) == keyOf(before[b])) {
-        const auto &now = sorted[a++], &then = before[b++];
-        const double newEnergy = energy(now), oldEnergy = energy(then);
+        const auto &now = sorted[a], &then = before[b];
+        const double oldEnergy = m_temporalEnergy[b];
+        if (now == then) {
+          energies[a++] = oldEnergy;
+          ++b;
+          totalOld += oldEnergy;
+          totalNew += oldEnergy;
+          continue;
+        }
+        const double newEnergy = energies[a++] = energy(now);
+        ++b;
         double difference = 0;
         for (unsigned c = 0; c < 3; ++c)
           difference += std::abs(double(now.radiance[c]) - then.radiance[c]);
@@ -326,11 +354,12 @@ namespace remix::scene {
         totalOld += oldEnergy;
         totalNew += newEnergy;
       } else if (a < sorted.size() && (b == before.size() || keyOf(sorted[a]) < keyOf(before[b]))) {
-        const double value = energy(sorted[a++]);
+        const double value = energies[a] = energy(sorted[a]);
+        ++a;
         changed += value;
         totalNew += value;
       } else {
-        const double value = energy(before[b++]);
+        const double value = m_temporalEnergy[b++];
         changed += value;
         totalOld += value;
       }
@@ -338,6 +367,7 @@ namespace remix::scene {
     if (sorted.empty() != before.empty() || changed > .25 * std::max(totalOld, totalNew)) {
       ++lightingGeneration;
       m_temporalLights = sorted;
+      m_temporalEnergy = std::move(energies);
     }
   }
 

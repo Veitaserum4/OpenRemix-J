@@ -134,6 +134,38 @@ remixapi_GetFrameBreakdownEXT(remixapi_FrameBreakdownEXT *out) {
   return REMIXAPI_ERROR_CODE_SUCCESS;
 }
 
+REMIXAPI remixapi_ErrorCode REMIXAPI_CALL
+remixapi_GetScenePreparationEXT(remixapi_ScenePreparationEXT *out) {
+  if (!out || out->structSize != sizeof(*out))
+    return REMIXAPI_ERROR_CODE_INVALID_ARGUMENTS;
+  std::lock_guard lock(g_apiMutex);
+  if (!g_runtime.isInitialized())
+    return REMIXAPI_ERROR_CODE_NOT_INITIALIZED;
+  const auto &st = g_runtime.staticStatistics();
+  *out = {.structSize = sizeof(*out), .staticActive = st.active};
+  out->staticSyncMilliseconds = st.syncMilliseconds;
+  out->viewModelMilliseconds = st.viewModelMilliseconds;
+  out->frameMilliseconds = st.frameMilliseconds;
+  out->opacityMilliseconds = st.opacityMilliseconds;
+  out->pruneMilliseconds = st.pruneMilliseconds;
+  out->lightingMilliseconds = st.lightingMilliseconds;
+  out->staticTableMilliseconds = st.tableMilliseconds;
+  out->staticUnits = st.units;
+  out->staticChanges = st.changes;
+  out->staticRebuiltUnits = st.syncRebuiltUnits;
+  out->staticRemovedUnits = st.syncRemovedUnits;
+  out->staticResyncs = st.resyncs;
+  out->staticReusedSurfaces = st.reusedSurfaces;
+  out->staticRebuiltSurfaces = st.rebuiltSurfaces;
+  out->frameInstances = st.frameInstances;
+  out->frameSurfaces = st.frameSurfaces;
+  out->opacityProofs = st.opacityProofs;
+  out->emitters = st.emitters;
+  out->lights = st.lights;
+  return REMIXAPI_ERROR_CODE_SUCCESS;
+}
+
+static_assert(sizeof(remixapi_ScenePreparationEXT) == 8 + 8 * 7 + 8 * 12);
 static_assert(sizeof(remixapi_TextureStatisticsEXT) == 168);
 
 // Process-wide counters: no runtime state is read, so no API lock is taken.

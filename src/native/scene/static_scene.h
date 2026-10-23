@@ -148,12 +148,26 @@ namespace remix::scene {
     bool m_hasCommitted = false;
   };
 
+  // prepareSceneFrame's phases after the static sync (StaticScene::Statistics):
+  // the frame's draws into instances and emitters (the set expanded when it
+  // cannot be used), and their opacity partitions; proofs are the partitions
+  // not found cached.
+  struct ScenePreparation {
+    double frameMilliseconds = 0, opacityMilliseconds = 0;
+    uint64_t opacityProofs = 0;
+  };
+
   // The CPU half of PathTracer::prepareScene. With statics, the static set
   // drawn this frame (NativeResources::staticDrawn) stays in statics and
   // frame.staticUnits is set; otherwise, and whenever the frame could not be
   // traced exactly that way (frame-local static instances, the opacity
   // profile), the set is expanded into the draw list and traced as before.
+  // mergeEmitters: the set's emitters join frame.emitters in trace order;
+  // otherwise frame.emitters are the frame's own and the caller reads the
+  // set's from statics (emitting(), as the merge would: animated only when
+  // filtering).
   TraceFrame prepareSceneFrame(NativeResources &resources, StaticScene *statics, OpacityCache &opacity,
                                WorkerPool *workers, bool opacityProfile, double seconds, bool filterEmission,
-                               SurfaceEmissionCache &emissionCache);
+                               SurfaceEmissionCache &emissionCache, ScenePreparation *timing = nullptr,
+                               bool mergeEmitters = true);
 } // namespace remix::scene

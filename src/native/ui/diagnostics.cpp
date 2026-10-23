@@ -339,6 +339,17 @@ namespace remix {
       // of trace surfaces.
       const auto &st = m_previousStatic;
       ImGui::Text("%-18s %7.3f ms", "Static sync", st.syncMilliseconds);
+      ImGui::Text("%-18s %7.3f ms", "Scene: view model", st.viewModelMilliseconds);
+      ImGui::Text("%-18s %7.3f ms", "Scene: frame", st.frameMilliseconds);
+      ImGui::Text("%-18s %7.3f ms", "Scene: opacity", st.opacityMilliseconds);
+      ImGui::Text("%-18s %7.3f ms", "Scene: prune", st.pruneMilliseconds);
+      ImGui::Text("%-18s %7.3f ms", "Scene: lighting", st.lightingMilliseconds);
+      ImGui::TextWrapped("Scene: %llu instances, %llu surfaces, %llu opacity proofs, %llu emitters, %llu lights; "
+                         "sync rebuilt %llu, removed %llu, resyncs %llu",
+                         (unsigned long long)st.frameInstances, (unsigned long long)st.frameSurfaces,
+                         (unsigned long long)st.opacityProofs, (unsigned long long)st.emitters,
+                         (unsigned long long)st.lights, (unsigned long long)st.syncRebuiltUnits,
+                         (unsigned long long)st.syncRemovedUnits, (unsigned long long)st.resyncs);
       ImGui::Text("%-18s %7.3f ms", "Static tables", st.tableMilliseconds);
       if (st.active)
         ImGui::TextWrapped("Static set: %llu instances, surfaces reused %llu, rebuilt %llu (%llu instances); "
