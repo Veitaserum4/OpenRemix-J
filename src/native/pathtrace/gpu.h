@@ -534,6 +534,9 @@ namespace remix {
     std::unique_ptr<Buffer> lightNodes, lightEmitters;
     std::unique_ptr<Buffer> movedLights; // this frame's scene::LightBvh::moved()
     uint64_t lightBufferGeneration = 0, torchBufferGeneration = 0, emissiveBufferGeneration = 0;
+    // Scratch for partial light tree uploads (uploadLights).
+    std::vector<scene::LightBvh::Range> lightEmitterRanges, lightNodeRanges;
+    std::vector<VkBufferCopy> lightCopies;
     struct LightGuiding {
       static constexpr uint32_t capacity = 65536;
       std::unique_ptr<Buffer> history[2], readback;

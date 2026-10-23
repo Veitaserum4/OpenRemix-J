@@ -470,6 +470,7 @@ namespace remix {
                             std::unique_ptr<Buffer> &nodes, std::unique_ptr<Buffer> &emitters) {
       if ((!nodes || nodes->host == deviceLocalScene || uploadedGeneration != bvh.generation) &&
           !bvh.nodes().empty()) {
+        const uint64_t previousGeneration = uploadedGeneration;
         uploadedGeneration = bvh.generation;
         if (deviceLocalScene) {
           // This slot's own buffers, whose fence has completed: rewritten in
@@ -477,6 +478,8 @@ namespace remix {
           // that flicker or come and go change the set every frame, and its
           // size with it) allocated device memory on those frames, tens of ms
           // at times.
+          const size_t nodeBytes = bvh.nodes().size() * sizeof(scene::LightNode);
+          const size_t emitterBytes = bvh.emitters().size() * sizeof(scene::LightEmitter);
           const auto place = [&](std::unique_ptr<Buffer> &out, const void *data, size_t size) {
             if (!out || out->host || out->size < size)
               out = buffer(size + size / 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -484,8 +487,32 @@ namespace remix {
             const VkBufferCopy copy = {.srcOffset = stage(data, size), .size = size};
             vkCmdCopyBuffer(command, staging.buffer->handle, out->handle, 1, &copy);
           };
-          place(nodes, bvh.nodes().data(), bvh.nodes().size() * sizeof(scene::LightNode));
-          place(emitters, bvh.emitters().data(), bvh.emitters().size() * sizeof(scene::LightEmitter));
+          // The slot's buffers hold its last generation: only what the tree
+          // wrote since then is copied (in a large emissive scene the whole
+          // tree is tens of MB, a refit for lights that come and go a few KB).
+          const auto patch = [&](Buffer &out, const void *data, size_t stride,
+                                 const std::vector<scene::LightBvh::Range> &ranges) {
+            lightCopies.clear();
+            for (const auto &[first, end] : ranges) {
+              const size_t size = size_t(end - first) * stride;
+              lightCopies.push_back({.srcOffset = stage(static_cast<const char *>(data) + size_t(first) * stride, size),
+                                     .dstOffset = size_t(first) * stride,
+                                     .size = size});
+            }
+            if (!lightCopies.empty())
+              vkCmdCopyBuffer(command, staging.buffer->handle, out.handle, uint32_t(lightCopies.size()),
+                              lightCopies.data());
+          };
+          const bool partial = nodes && emitters && !nodes->host && !emitters->host && nodes->size >= nodeBytes &&
+                               emitters->size >= emitterBytes &&
+                               bvh.changesSince(previousGeneration, lightEmitterRanges, lightNodeRanges);
+          if (partial) {
+            patch(*nodes, bvh.nodes().data(), sizeof(scene::LightNode), lightNodeRanges);
+            patch(*emitters, bvh.emitters().data(), sizeof(scene::LightEmitter), lightEmitterRanges);
+          } else {
+            place(nodes, bvh.nodes().data(), nodeBytes);
+            place(emitters, bvh.emitters().data(), emitterBytes);
+          }
         } else {
           // This slot's fence has completed; replace GPU-only allocations before
           // hostBuffer tries to map them when a diagnostic switches back.

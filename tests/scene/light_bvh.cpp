@@ -21,6 +21,72 @@ void require(bool value, const char *message) {
 } // namespace
 int main() {
   using namespace remix::scene;
+  // A buffer holding an older generation, patched with the ranges written
+  // since (changesSince), holds the current emitters and nodes exactly:
+  // static lights that animate, and dynamic lights that come and go.
+  {
+    std::mt19937 random(77);
+    const auto make = [&](uint64_t id) {
+      SphereLight light;
+      light.id = id;
+      light.triangle = 1;
+      light.radius = .2f;
+      for (unsigned c = 0; c < 3; ++c) {
+        light.position[c] = float(random() % 1000) / 10;
+        light.radiance[c] = 1 + float(random() % 10);
+        for (unsigned v = 0; v < 3; ++v)
+          light.corners[v][c] = light.position[c] + (v == c ? .5f : 0);
+      }
+      return light;
+    };
+    std::vector<SphereLight> base;
+    for (uint64_t i = 0; i < 400; ++i)
+      base.push_back(make(i + 1));
+    LightBvh bvh;
+    for (int frame = 0; frame < 200; ++frame)
+      bvh.update(base); // settled: one static part
+    struct Held {
+      uint64_t generation;
+      std::vector<LightEmitter> emitters;
+      std::vector<LightNode> nodes;
+    };
+    std::vector<Held> held;
+    size_t partials = 0;
+    std::vector<LightBvh::Range> emitterRanges, nodeRanges;
+    for (int frame = 0; frame < 120; ++frame) {
+      auto lights = base;
+      lights[size_t(frame * 7) % lights.size()].radiance[0] = float(frame % 5); // animate one static light
+      for (int k = 0; k < frame % 4; ++k)
+        lights.push_back(make((uint64_t(1) << 40) + uint64_t(frame * 10 + k))); // transient lights
+      bvh.update(lights);
+      for (size_t s = 0; s < held.size(); ++s) {
+        auto &h = held[s];
+        if (s != size_t(frame) % 3 || h.generation == bvh.generation)
+          continue;
+        if (bvh.changesSince(h.generation, emitterRanges, nodeRanges)) {
+          // As the GPU buffers: sized for the current tree, older contents kept.
+          h.emitters.resize(bvh.emitters().size());
+          h.nodes.resize(bvh.nodes().size());
+          for (const auto &[first, end] : emitterRanges)
+            std::copy(bvh.emitters().begin() + first, bvh.emitters().begin() + end, h.emitters.begin() + first);
+          for (const auto &[first, end] : nodeRanges)
+            std::copy(bvh.nodes().begin() + first, bvh.nodes().begin() + end, h.nodes.begin() + first);
+          ++partials;
+        } else {
+          h.emitters = bvh.emitters();
+          h.nodes = bvh.nodes();
+        }
+        h.generation = bvh.generation;
+        require(std::memcmp(h.emitters.data(), bvh.emitters().data(), h.emitters.size() * sizeof(LightEmitter)) == 0 &&
+                    std::memcmp(h.nodes.data(), bvh.nodes().data(), h.nodes.size() * sizeof(LightNode)) == 0,
+                "partial light tree uploads reproduce the tree");
+      }
+      // Three slots, one rendered per frame: each lags by up to three generations.
+      if (held.size() < 3)
+        held.push_back({bvh.generation, bvh.emitters(), bvh.nodes()});
+    }
+    require(partials > 0, "unchanged-size refits upload partially");
+  }
   // Sparse animation and input reordering must produce the same GPU records
   // as a fresh hierarchy, including when whole branches lose their power.
   {

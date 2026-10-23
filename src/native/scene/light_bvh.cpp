@@ -65,6 +65,9 @@ namespace remix::scene {
 
   bool LightBvh::update(std::vector<SphereLight> lights) {
     const auto start = std::chrono::steady_clock::now();
+    m_writtenEmitters.clear();
+    m_writtenNodes.clear();
+    m_writtenAll = false;
     const uint64_t buildsBefore = builds;
     const auto finish = [&] {
       updateMilliseconds =
@@ -156,6 +159,8 @@ namespace remix::scene {
       significance(lights);
       m_sorted.clear();
       ++generation;
+      m_writtenAll = true;
+      recordWritten();
       finish();
       return true;
     }
@@ -184,6 +189,7 @@ namespace remix::scene {
             }
             held = light;
             m_emitters[slot] = emitterOf(light);
+            m_writtenEmitters.push_back(slot);
             m_dirty[m_leaves[slot]] = 1;
             m_present[slot] = 1;
           }
@@ -193,6 +199,7 @@ namespace remix::scene {
             m_present[slot] = 0;
             std::fill_n(held.radiance, 3, 0.f);
             m_emitters[slot] = emitterOf(held);
+            m_writtenEmitters.push_back(slot);
             m_dirty[m_leaves[slot]] = 1;
           }
           ++retired;
@@ -238,6 +245,7 @@ namespace remix::scene {
             m_lights[slot] = extra[i];
             m_stamps[slot] = extraStamps[i];
             m_emitters[slot] = emitterOf(extra[i]);
+            m_writtenEmitters.push_back(uint32_t(slot));
             m_dirty[m_leaves[slot]] = 1;
           }
         } else {
@@ -310,8 +318,90 @@ namespace remix::scene {
     significance(lights);
     m_sorted = std::move(lights);
     ++generation;
+    recordWritten();
     finish();
     return true;
+  }
+
+  void LightBvh::recordWritten() {
+    const auto ranges = [](std::vector<uint32_t> &written) {
+      std::sort(written.begin(), written.end());
+      std::vector<Range> out;
+      for (const uint32_t i : written) {
+        if (!out.empty() && i <= out.back().second) {
+          out.back().second = std::max(out.back().second, i + 1);
+          continue;
+        }
+        out.emplace_back(i, i + 1);
+      }
+      return out;
+    };
+    Written written;
+    written.generation = generation;
+    // A resize rewrites only the dynamic part, whose writes are listed; the
+    // buffers' new sizes are the caller's to check.
+    written.all = m_writtenAll;
+    if (!written.all) {
+      written.emitters = ranges(m_writtenEmitters);
+      written.nodes = ranges(m_writtenNodes);
+    }
+    if (m_written.size() == kWrittenHistory)
+      m_written.erase(m_written.begin());
+    m_written.push_back(std::move(written));
+    m_writtenEmitters.clear();
+    m_writtenNodes.clear();
+  }
+
+  bool LightBvh::changesSince(uint64_t since, std::vector<Range> &emitters, std::vector<Range> &nodes) const {
+    emitters.clear();
+    nodes.clear();
+    if (since == generation)
+      return true;
+    size_t first = 0;
+    while (first < m_written.size() && m_written[first].generation <= since)
+      ++first;
+    // The history must hold every generation after `since`.
+    if (first == m_written.size() || m_written[first].generation != since + 1)
+      return false;
+    const auto merge = [](std::vector<Range> &out) {
+      std::sort(out.begin(), out.end());
+      size_t kept = 0;
+      for (size_t i = 0; i < out.size(); ++i) {
+        if (kept && out[i].first <= out[kept - 1].second)
+          out[kept - 1].second = std::max(out[kept - 1].second, out[i].second);
+        else
+          out[kept++] = out[i];
+      }
+      out.resize(kept);
+    };
+    for (size_t i = first; i < m_written.size(); ++i) {
+      const auto &written = m_written[i];
+      if (written.all)
+        return false;
+      emitters.insert(emitters.end(), written.emitters.begin(), written.emitters.end());
+      nodes.insert(nodes.end(), written.nodes.begin(), written.nodes.end());
+    }
+    merge(emitters);
+    merge(nodes);
+    // Ranges written by earlier generations may lie past the current end.
+    const auto clamp = [](std::vector<Range> &out, size_t size) {
+      size_t kept = 0;
+      for (auto range : out) {
+        range.second = std::min(range.second, uint32_t(size));
+        if (range.first < range.second)
+          out[kept++] = range;
+      }
+      out.resize(kept);
+    };
+    clamp(emitters, m_emitters.size());
+    clamp(nodes, m_nodes.size());
+    // Scattered changes over most of the tree: one copy of everything is cheaper.
+    size_t emitterCount = 0, nodeCount = 0;
+    for (const auto &range : emitters)
+      emitterCount += range.second - range.first;
+    for (const auto &range : nodes)
+      nodeCount += range.second - range.first;
+    return emitterCount * 2 <= m_emitters.size() && nodeCount * 2 <= m_nodes.size() && emitters.size() + nodes.size() <= 4096;
   }
 
   // Tiny animated-emission fluctuations still update the GPU light data, but
@@ -379,6 +469,7 @@ namespace remix::scene {
   // are in the same order (static, then dynamic).
   void LightBvh::build(std::vector<SphereLight> statics, std::vector<uint64_t> staticStamps,
                        std::vector<SphereLight> dynamics, std::vector<uint64_t> dynamicStamps, Reason reason) {
+    m_writtenAll = true;
     m_split |= !dynamics.empty();
     m_staticReal = uint32_t(statics.size());
     m_dynamicReal = uint32_t(dynamics.size());
@@ -440,8 +531,10 @@ namespace remix::scene {
     }
     const uint32_t total = uint32_t(m_lights.size());
     m_emitters.resize(total);
-    for (uint32_t i = m_staticCount; i < total; ++i)
+    for (uint32_t i = m_staticCount; i < total; ++i) {
       m_emitters[i] = emitterOf(m_lights[i]);
+      m_writtenEmitters.push_back(i);
+    }
     m_nodes.resize(m_staticNodes);
     m_parents.resize(m_staticNodes);
     m_leaves.resize(total);
@@ -503,6 +596,8 @@ namespace remix::scene {
   }
 
   void LightBvh::bounds(uint32_t index) {
+    if (!m_writtenAll)
+      m_writtenNodes.push_back(index);
     auto &node = m_nodes[index];
     if (node.links[3] == 1) {
       const auto &light = m_lights[node.links[2]];

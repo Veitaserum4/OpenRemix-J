@@ -75,8 +75,25 @@ namespace remix::scene {
     // Updates a new light stays in the dynamic part before it counts as at
     // rest, and between builds.
     static constexpr uint64_t kSettle = 60, kBuildInterval = 120;
+    // For a buffer that holds generation `since`: the emitter and node ranges
+    // [first, end) written since then, ascending. False: upload everything (a
+    // build, most of the tree changed, or `since` older than the
+    // kept history).
+    using Range = std::pair<uint32_t, uint32_t>;
+    bool changesSince(uint64_t since, std::vector<Range> &emitters, std::vector<Range> &nodes) const;
+    static constexpr size_t kWrittenHistory = 8;
 
   private:
+    // What each of the last kWrittenHistory generations wrote.
+    struct Written {
+      uint64_t generation = 0;
+      bool all = false;
+      std::vector<Range> emitters, nodes;
+    };
+    std::vector<Written> m_written;
+    std::vector<uint32_t> m_writtenEmitters, m_writtenNodes; // this update's writes
+    bool m_writtenAll = false;
+    void recordWritten();
     std::vector<MovedLight> m_moved;
     void build(std::vector<SphereLight> statics, std::vector<uint64_t> staticStamps,
                std::vector<SphereLight> dynamics, std::vector<uint64_t> dynamicStamps, Reason reason);
