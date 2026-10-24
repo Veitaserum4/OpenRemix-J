@@ -88,7 +88,9 @@ void PathTracer::Gpu::configureVolume(VkCommandBuffer command, Frame &frame, con
   frame.volumeConfig[0] = 1;
   frame.volumeConfig[1] = cells;
   frame.volumeConfig[2] = levels;
-  frame.volumeConfig[3] = std::clamp(options.volumetricUpdateInterval, 1u, 64u);
+  frame.volumeConfig[3] = std::clamp(options.volumetricUpdateInterval, 1u, 64u) |
+                              // bits 8-23: the sky's scale, 8.8 fixed point (volume.glsl volumeUpdate)
+                              uint32_t(std::lround(std::clamp(options.volumetricSky, 0.f, 255.f) * 256)) << 8;
   frame.volumeFrame[0] = v.counter++;
   frame.volumeFrame[1] = std::clamp(options.volumetricHistory, 1u, 256u);
   frame.volumeFrame[2] = std::clamp(options.volumetricSteps, 1u, 64u);

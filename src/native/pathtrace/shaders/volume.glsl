@@ -208,6 +208,8 @@ void volumeUpdate(uint index) {
   if(frame.volumeGrid==0||index>total)return;
   VolumeCells cells=VolumeCells(frame.volumeGrid);
   uint skyFirst=volumeSkyFirst();
+  // How much of the environment's light the medium scatters (volumetricSky).
+  float skyScale=float((frame.volumeConfig.w>>8)&0xffffu)/256;
   if(index==total) {
     // The cell past the grids (volumeFar): sixteen directions of the
     // environment a frame, and the sun.
@@ -223,7 +225,7 @@ void volumeUpdate(uint index) {
     float count=min(stored.w+1,32);
     stored=vec4(mix(stored.rgb,sky,1/count),count);
     cells.data[skyFirst+total]=stored;
-    cells.data[total]=vec4(stored.rgb+.25*frame.lightRadiance.rgb,count);
+    cells.data[total]=vec4(stored.rgb*skyScale+.25*frame.lightRadiance.rgb,count);
     return;
   }
   uint level=index/perLevel,local=index%perLevel;
@@ -254,7 +256,7 @@ void volumeUpdate(uint index) {
       if(outerSky.w>0)storedSky=vec4(outerSky.rgb/outerSky.w,1);
     }
   }
-  bool due=(hash(index)+frame.volumeFrame.x)%max(frame.volumeConfig.w,1u)==0u;
+  bool due=(hash(index)+frame.volumeFrame.x)%max(frame.volumeConfig.w&255u,1u)==0u;
   if(!due) {
     if(entered){cells.data[index]=stored;cells.data[skyFirst+index]=storedSky;}
     return;
@@ -284,7 +286,7 @@ void volumeUpdate(uint index) {
   if(any(isnan(sky))||any(isinf(sky)))sky=vec3(0);
   float history=float(max(frame.volumeFrame.y,1u));
   float count=min(stored.w+1,history),skyCount=min(storedSky.w+1,history*16);
-  vec3 direct=mix(max(stored.rgb-storedSky.rgb,vec3(0)),light,1/count);
+  vec3 direct=mix(max(stored.rgb-storedSky.rgb*skyScale,vec3(0)),light,1/count);
   storedSky=vec4(mix(storedSky.rgb,sky,1/skyCount),skyCount);
   // Even so a cell the sky seldom reaches glowed for seconds after a sample
   // that found it, alone among dark ones. Neighbouring cells see nearly the
@@ -302,6 +304,6 @@ void volumeUpdate(uint index) {
     }
   }
   cells.data[skyFirst+index]=storedSky;
-  cells.data[index]=vec4(direct+storedSky.rgb,count);
+  cells.data[index]=vec4(direct+storedSky.rgb*skyScale,count);
 }
 #endif

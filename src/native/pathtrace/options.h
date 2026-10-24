@@ -145,6 +145,10 @@ namespace remix {
     float volumetricHeightFalloff = 0, volumetricBaseHeight = 0;
     uint32_t volumetricUpAxis = 2;
     float volumetricScattering = 1, volumetricMaxDistance = 250;
+    // How much of the environment's light the medium scatters (volumetricScattering
+    // still applies): the sky seen from a cell, and the medium past the grids,
+    // which is lit as open air. Less: tunnels and rooms open to the sky glow less.
+    float volumetricSky = 1;
     // The scattered light is held in volumetricLevels nested grids of
     // volumetricCells^3 cells around the camera, the first of
     // volumetricCellSize meters and each next one twice as coarse. A cell is

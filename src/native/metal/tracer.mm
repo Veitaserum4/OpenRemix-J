@@ -1740,7 +1740,9 @@ namespace remix::metal {
     constants.volumeConfig[0] = 1;
     constants.volumeConfig[1] = cells;
     constants.volumeConfig[2] = levels;
-    constants.volumeConfig[3] = std::clamp(options.volumetricUpdateInterval, 1u, 64u);
+    constants.volumeConfig[3] = std::clamp(options.volumetricUpdateInterval, 1u, 64u) |
+                              // bits 8-23: the sky's scale, 8.8 fixed point (volume.glsl volumeUpdate)
+                              uint32_t(std::lround(std::clamp(options.volumetricSky, 0.f, 255.f) * 256)) << 8;
     constants.volumeFrame[0] = v.counter++;
     constants.volumeFrame[1] = std::clamp(options.volumetricHistory, 1u, 256u);
     constants.volumeFrame[2] = std::clamp(options.volumetricSteps, 1u, 64u);

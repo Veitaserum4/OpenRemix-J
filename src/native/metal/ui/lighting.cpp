@@ -68,6 +68,10 @@ namespace remix {
           ui::ColorEdit3("Scattering color", options.volumetricColor);
         }
         ui::SliderFloat("Scattered light", &options.volumetricScattering, 0.f, 8.f, "%.2f");
+        ui::SliderFloat("Sky light in the medium", &options.volumetricSky, 0.f, 4.f, "%.2f");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip("How much of the sky's light the medium scatters, in view of it and in the distance\n"
+                            "past the grids (lit as open air). Less: tunnels open to the sky glow less.");
         ui::SliderFloat("Height falloff (m)", &options.volumetricHeightFalloff, 0.f, 500.f, "%.1f");
         if (ImGui::IsItemHovered())
           ImGui::SetTooltip("Above the base height the medium thins to 37%% over this height. 0: uniform.");
