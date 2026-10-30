@@ -26,6 +26,10 @@ void textureFilled(uint64_t hash, D3DFORMAT format, uint32_t width, uint32_t hei
 // frame; false leaves it to the real device.
 bool draw(const Draw &draw, DrawKind kind);
 
+// The device's enabled fixed-function lights, as the light state changed and
+// at least once a frame (dxvk-remix emitDirtyLights): each is lit this frame.
+void lights(const std::vector<D3DLIGHT9> &enabled);
+
 // The frame is done: submits it and presents. `width` x `height` is the
 // back buffer (the UI canvas).
 void present(uint32_t width, uint32_t height);

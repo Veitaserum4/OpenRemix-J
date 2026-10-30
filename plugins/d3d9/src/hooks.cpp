@@ -48,6 +48,7 @@ enum : unsigned {
   kUpdateSurface = 30,
   kUpdateTexture = 31,
   kSetLight = 51,
+  kLightEnable = 53,
   kSetSoftwareVertexProcessing = 77,
   kGetSoftwareVertexProcessing = 78,
   kDrawPrimitive = 81,
@@ -124,6 +125,9 @@ std::unordered_map<const void *, std::shared_ptr<const ShaderCode>> g_shaders;
 
 std::mutex g_lightLock;
 std::unordered_map<DWORD, D3DLIGHT9> g_lights;
+// The light state changed since the enabled lights were last collected (set
+// again each frame: each frame lights what is enabled).
+std::atomic<bool> g_lightsDirty{true};
 
 std::mutex g_declLock;
 
@@ -415,6 +419,7 @@ bool presenting() { return ensureStarted() && translator::active(); }
 void endFrame() {
   translator::present(g_backBufferWidth, g_backBufferHeight);
   g_drawId = 0;
+  g_lightsDirty = true;
   input::setMenuOpen(renderer().status().menuOpen != 0);
   // Modules the game loaded since (rarely any after its first frames).
   static uint32_t frames = 0;
@@ -485,8 +490,7 @@ struct ShaderState {
   BOOL b[16];
 };
 
-bool gatherState(IDirect3DDevice9 *dev, Draw &d, Declaration &declaration, std::vector<Light> &lights,
-                 ShaderState &shaderState) {
+bool gatherState(IDirect3DDevice9 *dev, Draw &d, Declaration &declaration, ShaderState &shaderState) {
   IDirect3DVertexShader9 *shader = nullptr;
   if (SUCCEEDED(dev->GetVertexShader(&shader)) && shader) {
     d.vertexShader = true;
@@ -606,18 +610,24 @@ bool gatherState(IDirect3DDevice9 *dev, Draw &d, Declaration &declaration, std::
   dev->GetTransform(D3DTS_PROJECTION, &d.projection);
   dev->GetViewport(&d.viewport);
   dev->GetMaterial(&d.material);
+  return true;
+}
 
-  if (d.renderStates[D3DRS_LIGHTING]) {
+// The enabled lights go to the translator whenever the light state changed
+// (dxvk-remix D3D9Rtx::emitDirtyLights), whatever the draw lights.
+void collectLights(IDirect3DDevice9 *dev) {
+  if (!g_lightsDirty.exchange(false))
+    return;
+  std::vector<D3DLIGHT9> enabled;
+  {
     std::lock_guard<std::mutex> lock(g_lightLock);
     for (const auto &[index, light] : g_lights) {
-      BOOL enabled = FALSE;
-      if (SUCCEEDED(dev->GetLightEnable(index, &enabled)) && enabled)
-        lights.push_back({index, light});
+      BOOL on = FALSE;
+      if (SUCCEEDED(dev->GetLightEnable(index, &on)) && on)
+        enabled.push_back(light);
     }
-    d.lights = lights.data();
-    d.lightCount = uint32_t(lights.size());
   }
-  return true;
+  translator::lights(enabled);
 }
 
 // Binds the device's vertex and index buffers' shadows into the draw. The
@@ -655,9 +665,9 @@ template <class Fill> bool capture(IDirect3DDevice9 *dev, Draw &d, Fill fillGeom
   perf::Timer timer(perf::g_counters.capture);
   ++perf::g_counters.draws;
   Declaration declaration;
-  std::vector<Light> lights;
   ShaderState shaderState;
-  if (!gatherState(dev, d, declaration, lights, shaderState))
+  collectLights(dev);
+  if (!gatherState(dev, d, declaration, shaderState))
     return true;
   std::lock_guard<std::mutex> lock(g_shadowLock);
   fillGeometry(d);
@@ -858,9 +868,18 @@ HRESULT STDMETHODCALLTYPE setLight(IDirect3DDevice9 *dev, DWORD index, const D3D
   if (light) {
     std::lock_guard<std::mutex> lock(g_lightLock);
     g_lights[index] = *light;
+    g_lightsDirty = true;
   }
   auto fn = original<SetLightFn>(dev, kSetLight);
   return fn ? fn(dev, index, light) : D3DERR_INVALIDCALL;
+}
+
+HRESULT STDMETHODCALLTYPE lightEnable(IDirect3DDevice9 *dev, DWORD index, BOOL enable) {
+  using LightEnableFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, DWORD, BOOL);
+  auto fn = original<LightEnableFn>(dev, kLightEnable);
+  const HRESULT hr = fn ? fn(dev, index, enable) : D3DERR_INVALIDCALL;
+  g_lightsDirty = true;
+  return hr;
 }
 
 HRESULT STDMETHODCALLTYPE createVertexDeclaration(IDirect3DDevice9 *dev, const D3DVERTEXELEMENT9 *elements,
@@ -1018,6 +1037,7 @@ void hookDevice(IDirect3DDevice9 *dev) {
   at(kUpdateSurface, &updateSurface);
   at(kUpdateTexture, &updateTexture);
   at(kSetLight, &setLight);
+  at(kLightEnable, &lightEnable);
   at(kDrawPrimitive, &drawPrimitive);
   at(kDrawIndexedPrimitive, &drawIndexedPrimitive);
   at(kDrawPrimitiveUP, &drawPrimitiveUP);
