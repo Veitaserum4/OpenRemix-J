@@ -1,0 +1,5 @@
+{
+  "repository": "https://github.com/Cyan4973/xxHash",
+  "version": "0.8.4",
+  "files": ["xxhash.h", "LICENSE"]
+}

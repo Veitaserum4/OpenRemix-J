@@ -51,6 +51,9 @@ fast on NVIDIA) and stored as XZ streams in `pathtrace/shaders/embedded.bin`; `e
 indexes them, `embedded_data.cpp` embeds the blob and `trace::shader()` decompresses a stage on
 first use (vendored XZ Embedded).
 Standalone driver probes in `tools/vulkan-probes` require `-Dvulkan_probes=true` and shader tools.
+`plugins/d3d9` is a separate Meson project, not part of the runtime build: a drop-in `d3d9.dll`
+for Direct3D 9 games (x64 in process; x86 through its own 64-bit `OpenRemixHost.exe`). Its scripts are
+in `plugins/d3d9/scripts`; `src/profiles.cpp` is generated (see `docs/features/d3d9-plugin.md`).
 macOS builds the native Metal backend in `src/native/metal` instead of the Vulkan runtime
 (see `docs/features/metal-backend.md`). The build generates its libraries from the
 same shaders (`scripts/shaders/generate.py metal`).
