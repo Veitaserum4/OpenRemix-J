@@ -47,6 +47,9 @@ enum : unsigned {
   kCreateIndexBuffer = 27,
   kUpdateSurface = 30,
   kUpdateTexture = 31,
+  kSetTransform = 44,
+  kGetTransform = 45,
+  kMultiplyTransform = 46,
   kSetLight = 51,
   kLightEnable = 53,
   kSetSoftwareVertexProcessing = 77,
@@ -673,8 +676,27 @@ template <class Fill> bool capture(IDirect3DDevice9 *dev, Draw &d, Fill fillGeom
   fillGeometry(d);
   const bool pretransformed = findElement(d.elements, D3DDECLUSAGE_POSITIONT, 0) != nullptr;
   // A material texture without a hash: dxvk-remix leaves the draw.
-  const DrawKind kind = selectTexture(d, g_env.config) ? classify(d, g_env.config, pretransformed) : DrawKind::Skip;
-  const bool taken = translator::draw(d, kind);
+  const char *reason = "material texture without hash";
+  const DrawKind kind =
+      selectTexture(d, g_env.config) ? classify(d, g_env.config, pretransformed, &reason) : DrawKind::Skip;
+  const char *left = nullptr;
+  const bool taken = translator::draw(d, kind, &left);
+  if (translator::loggingDraws()) {
+    // Vertex blending: the declaration's blend elements and the state.
+    const bool weights = findElement(d.elements, D3DDECLUSAGE_BLENDWEIGHT, 0) != nullptr;
+    const bool indices = findElement(d.elements, D3DDECLUSAGE_BLENDINDICES, 0) != nullptr;
+    char line[512];
+    std::snprintf(line, sizeof(line),
+                  "%u %s (%s)%s%s: prims %u type %d indexed %d, vs %d%s ps %d, vertexblend %lu indexedblend %lu, "
+                  "decl weights %d indices %d, texture %016llX, world %.1f %.1f %.1f, view %.1f %.1f %.1f, viewport z %.2f-%.2f, projection _22 %.3f\n",
+                  d.drawId, kindName(kind), reason, taken ? ", taken" : "", left ? (std::string(", left: ") + left).c_str() : "",
+                  d.primCount, int(d.type), int(d.indexed), int(d.vertexShader), d.shader ? " (capturable)" : "",
+                  int(d.pixelShader), d.renderStates[D3DRS_VERTEXBLEND],
+                  d.renderStates[D3DRS_INDEXEDVERTEXBLENDENABLE], int(weights), int(indices),
+                  static_cast<unsigned long long>(d.texture0), d.world._41, d.world._42, d.world._43, d.view._41,
+                  d.view._42, d.view._43, d.viewport.MinZ, d.viewport.MaxZ, d.projection._22);
+    translator::logDraw(line);
+  }
   // What the translator did not take stays the real device's; occlusion
   // queries count what it rasterizes.
   return !taken || g_env.config.forwardDraws || g_openQueries > 0;
@@ -874,6 +896,67 @@ HRESULT STDMETHODCALLTYPE setLight(IDirect3DDevice9 *dev, DWORD index, const D3D
   return fn ? fn(dev, index, light) : D3DERR_INVALIDCALL;
 }
 
+// The 256 world matrices (D3DTS_WORLDMATRIX(n)) as the game set them. A
+// hardware vertex processing device keeps only as many as its
+// MaxVertexBlendMatrixIndex allows and forgets the rest; a game made for
+// software vertex processing (HL2 RTX) sets up to 256 bones for indexed
+// vertex blending. Get* calls (the game's, and the translator's skinning)
+// read them from here.
+std::mutex g_worldLock;
+D3DMATRIX g_worldMatrices[256];
+bool g_worldMatricesSet = [] {
+  for (D3DMATRIX &m : g_worldMatrices) {
+    m = {};
+    m._11 = m._22 = m._33 = m._44 = 1;
+  }
+  return true;
+}();
+
+bool worldMatrix(D3DTRANSFORMSTATETYPE state) { return state >= D3DTS_WORLDMATRIX(0) && state <= D3DTS_WORLDMATRIX(255); }
+
+using SetTransformFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DTRANSFORMSTATETYPE, const D3DMATRIX *);
+
+HRESULT STDMETHODCALLTYPE setTransform(IDirect3DDevice9 *dev, D3DTRANSFORMSTATETYPE state, const D3DMATRIX *matrix) {
+  auto fn = original<SetTransformFn>(dev, kSetTransform);
+  const HRESULT hr = fn ? fn(dev, state, matrix) : D3DERR_INVALIDCALL;
+  if (!worldMatrix(state) || !matrix || t_internal)
+    return hr;
+  std::lock_guard<std::mutex> lock(g_worldLock);
+  g_worldMatrices[state - D3DTS_WORLDMATRIX(0)] = *matrix;
+  return D3D_OK;
+}
+
+HRESULT STDMETHODCALLTYPE getTransform(IDirect3DDevice9 *dev, D3DTRANSFORMSTATETYPE state, D3DMATRIX *matrix) {
+  if (worldMatrix(state) && matrix && !t_internal) {
+    std::lock_guard<std::mutex> lock(g_worldLock);
+    *matrix = g_worldMatrices[state - D3DTS_WORLDMATRIX(0)];
+    return D3D_OK;
+  }
+  using GetTransformFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DTRANSFORMSTATETYPE, D3DMATRIX *);
+  auto fn = original<GetTransformFn>(dev, kGetTransform);
+  return fn ? fn(dev, state, matrix) : D3DERR_INVALIDCALL;
+}
+
+HRESULT STDMETHODCALLTYPE multiplyTransform(IDirect3DDevice9 *dev, D3DTRANSFORMSTATETYPE state,
+                                            const D3DMATRIX *matrix) {
+  using MultiplyTransformFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DTRANSFORMSTATETYPE,
+                                                           const D3DMATRIX *);
+  auto fn = original<MultiplyTransformFn>(dev, kMultiplyTransform);
+  const HRESULT hr = fn ? fn(dev, state, matrix) : D3DERR_INVALIDCALL;
+  if (!worldMatrix(state) || !matrix || t_internal)
+    return hr;
+  // D3D9: the transform becomes matrix x transform.
+  std::lock_guard<std::mutex> lock(g_worldLock);
+  D3DMATRIX &current = g_worldMatrices[state - D3DTS_WORLDMATRIX(0)];
+  D3DMATRIX product = {};
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c)
+      for (int k = 0; k < 4; ++k)
+        product.m[r][c] += matrix->m[r][k] * current.m[k][c];
+  current = product;
+  return D3D_OK;
+}
+
 HRESULT STDMETHODCALLTYPE lightEnable(IDirect3DDevice9 *dev, DWORD index, BOOL enable) {
   using LightEnableFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, DWORD, BOOL);
   auto fn = original<LightEnableFn>(dev, kLightEnable);
@@ -1036,6 +1119,9 @@ void hookDevice(IDirect3DDevice9 *dev) {
   at(kCreateIndexBuffer, &createIndexBuffer);
   at(kUpdateSurface, &updateSurface);
   at(kUpdateTexture, &updateTexture);
+  at(kSetTransform, &setTransform);
+  at(kGetTransform, &getTransform);
+  at(kMultiplyTransform, &multiplyTransform);
   at(kSetLight, &setLight);
   at(kLightEnable, &lightEnable);
   at(kDrawPrimitive, &drawPrimitive);

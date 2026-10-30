@@ -94,53 +94,58 @@ bool selectTexture(Draw &d, const Config &c) {
   return true;
 }
 
-DrawKind classify(const Draw &d, const Config &c, bool pretransformed) {
+DrawKind classify(const Draw &d, const Config &c, bool pretransformed, const char **reason) {
+  auto because = [&](DrawKind kind, const char *why) {
+    if (reason)
+      *reason = why;
+    return kind;
+  };
   if (d.drawId < c.drawCallRangeFirst || d.drawId > c.drawCallRangeLast)
-    return DrawKind::Skip;
+    return because(DrawKind::Skip, "draw call range");
   // A vertex shader's draw is captured (rtx.useVertexCapture) when its
   // bytecode is known.
   if (d.vertexShader && !d.shader)
-    return DrawKind::Forward;
+    return because(DrawKind::Forward, "vertex shader not capturable");
   if (!d.primCount ||
       (d.type != D3DPT_TRIANGLELIST && d.type != D3DPT_TRIANGLESTRIP && d.type != D3DPT_TRIANGLEFAN))
-    return DrawKind::Forward;
+    return because(DrawKind::Forward, "primitive type");
   if ((alphaTesting(d) && !c.enableAlphaTest) || (blending(d) && !c.enableAlphaBlend))
-    return DrawKind::Skip;
+    return because(DrawKind::Skip, "alpha options");
   // The game counts what its occlusion queries see.
   if (d.occlusionQuery || !d.target)
-    return DrawKind::Forward;
+    return because(DrawKind::Forward, "occlusion query or no target");
   constexpr DWORD rgb = D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE;
   if ((d.renderStates[D3DRS_COLORWRITEENABLE] & rgb) != rgb)
-    return DrawKind::Forward;
+    return because(DrawKind::Forward, "color writes off");
   // A shadow mask: an untextured fill of a small square target of a format
   // no colour texture has.
   const uint32_t *s = d.stages[0].states;
   if ((s[D3DTSS_COLOROP] == D3DTOP_SELECTARG1 && s[D3DTSS_COLORARG1] != D3DTA_TEXTURE) ||
       (s[D3DTSS_COLOROP] == D3DTOP_SELECTARG2 && s[D3DTSS_COLORARG2] != D3DTA_TEXTURE))
     if (d.targetWidth == d.targetHeight && d.targetWidth < d.backBufferWidth / 4 && !colorFormat(d.targetFormat))
-      return DrawKind::Skip;
+      return because(DrawKind::Skip, "shadow mask");
   // Another render target (dxvk-remix isRenderTargetPrimary compares sizes).
   if (d.targetWidth != d.backBufferWidth || d.targetHeight != d.backBufferHeight)
-    return DrawKind::Forward;
+    return because(DrawKind::Forward, "other render target");
   // A stencil shadow volume.
   const DWORD zFail = d.renderStates[D3DRS_STENCILZFAIL];
   if (d.renderStates[D3DRS_STENCILENABLE] && d.renderStates[D3DRS_STENCILFUNC] == D3DCMP_ALWAYS &&
       (zFail == D3DSTENCILOP_INCR || zFail == D3DSTENCILOP_DECR || zFail == D3DSTENCILOP_INCRSAT ||
        zFail == D3DSTENCILOP_DECRSAT) &&
       !d.renderStates[D3DRS_ZWRITEENABLE])
-    return DrawKind::Skip;
+    return because(DrawKind::Skip, "stencil shadow volume");
   // UI: an orthographic projection without depth writes, or a UI texture.
   if (!d.vertexShader && c.orthographicIsUI && d.projection._44 == 1.0f && !d.renderStates[D3DRS_ZWRITEENABLE])
-    return DrawKind::Ui;
+    return because(DrawKind::Ui, "orthographic");
   if (anyTextureIn(d, c.uiTextures))
-    return DrawKind::Ui;
+    return because(DrawKind::Ui, "UI texture");
   if (pretransformed)
-    return c.preTransformedVerticesIsUI ? DrawKind::Ui : DrawKind::Forward;
+    return because(c.preTransformedVerticesIsUI ? DrawKind::Ui : DrawKind::Forward, "pre-transformed");
   if (d.texture0)
     if (auto it = c.categories.find(d.texture0);
         it != c.categories.end() && (it->second & REMIXAPI_INSTANCE_CATEGORY_BIT_IGNORE))
-      return DrawKind::Skip;
-  return DrawKind::World;
+      return because(DrawKind::Skip, "ignored texture");
+  return because(DrawKind::World, "world");
 }
 
 const char *kindName(DrawKind kind) {

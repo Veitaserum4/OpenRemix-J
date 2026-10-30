@@ -73,6 +73,11 @@ struct Config {
   // keys the game's draws had, rewritten every 600 frames (to check them
   // against a mod's mesh_ and mat_ names).
   std::string hashLog;
+  // openremix.drawLog: a file describing every draw of one frame (frame
+  // openremix.drawLogFrame, default 600): how it was classified and why,
+  // its vertex blending and shader, what the translator made of it.
+  std::string drawLog;
+  uint32_t drawLogFrame = 600;
 };
 
 // Applies one file's `key = value` lines on top of `config`.
