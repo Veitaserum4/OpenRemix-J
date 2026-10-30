@@ -470,11 +470,14 @@ std::shared_ptr<const Geometry> geometryFor(const Draw &d) {
 // vertex D3DRS_VERTEXBLEND weights (the last one 1 less the others) of the
 // world matrices D3DTS_WORLDMATRIX(n), n the vertex's blend indices or its
 // weights' order. A draw that uses one matrix only takes it as its world.
+// The matrices place the vertices in the draw's object space: place() takes
+// them to the world (dxvk-remix DrawCallState::finalizeSkinningData).
 struct Skin {
   uint32_t bonesPerVertex = 0;
   std::vector<float> weights;
   std::vector<uint32_t> indices;
-  std::vector<remixapi_Transform> bones;
+  std::vector<D3DMATRIX> matrices; // D3DTS_WORLDMATRIX(0..)
+  std::vector<remixapi_Transform> bones; // in the world (place)
   int single = -1; // the one matrix used
   D3DMATRIX singleMatrix;
 };
@@ -511,15 +514,32 @@ bool skinning(const Draw &d, const Mesh &m, Skin &out) {
     d.device->GetTransform(D3DTS_WORLDMATRIX(low), &out.singleMatrix);
     return true;
   }
-  out.bones.resize(high + 1);
-  for (uint32_t i = 0; i <= high; ++i) {
-    D3DMATRIX world;
-    d.device->GetTransform(D3DTS_WORLDMATRIX(i), &world);
-    float t[3][4];
-    transformOf(world, t);
-    std::memcpy(out.bones[i].matrix, t, sizeof(t));
-  }
+  out.matrices.resize(high + 1);
+  for (uint32_t i = 0; i <= high; ++i)
+    d.device->GetTransform(D3DTS_WORLDMATRIX(i), &out.matrices[i]);
   return true;
+}
+
+// A skinned draw's object space in the world: its view matrix (which some
+// games give the model's placement, Source's fixed-function path among
+// them), out through the camera's (dxvk-remix: objectToWorld =
+// viewToWorld x objectToView). Identity where the draw's view is the
+// camera's.
+void place(Skin &skin, const D3DMATRIX &drawView, const D3DMATRIX *cameraView) {
+  D3DMATRIX placement = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}};
+  D3DMATRIX inverse;
+  if (cameraView && invert(*cameraView, inverse))
+    placement = multiply(drawView, inverse);
+  if (skin.single >= 0) {
+    skin.singleMatrix = multiply(skin.singleMatrix, placement);
+    return;
+  }
+  skin.bones.resize(skin.matrices.size());
+  for (size_t i = 0; i < skin.matrices.size(); ++i) {
+    float t[3][4];
+    transformOf(multiply(skin.matrices[i], placement), t);
+    std::memcpy(skin.bones[i].matrix, t, sizeof(t));
+  }
 }
 
 float floatState(DWORD bits) {
@@ -546,10 +566,16 @@ void noteFog(const Draw &d) {
   g_fog.density = floatState(d.renderStates[D3DRS_FOGDENSITY]);
 }
 
+// Why the translator left the last draw it could not take (drawLog).
+const char *g_leftBecause = "";
+FILE *g_drawLog = nullptr; // this frame's draws, described (openremix.drawLog)
+
 bool worldDraw(const Draw &d) {
   const std::shared_ptr<const Geometry> geometry = geometryFor(d);
-  if (!geometry)
+  if (!geometry) {
+    g_leftBecause = d.shader ? "geometry or vertex capture failed" : "geometry not readable";
     return false;
+  }
   uint32_t categories = 0;
   if (d.texture0)
     if (auto it = g_config.categories.find(d.texture0); it != g_config.categories.end())
@@ -559,6 +585,41 @@ bool worldDraw(const Draw &d) {
   const bool skinned = skinning(d, geometry->mesh, skin);
   bool updatesCamera;
   const CameraClass camera = classifyCamera(d, g_config, sky, skinned, g_cameraFrame, updatesCamera);
+  if (skinned) {
+    // The camera the skinned matrices are decomposed with: the draw's class's
+    // this frame, else the main camera (dxvk-remix: the last set up).
+    const Camera *view = camera != CameraClass::Unknown && g_cameras[size_t(camera)].set
+                             ? &g_cameras[size_t(camera)]
+                         : g_cameras[size_t(CameraClass::Main)].set ? &g_cameras[size_t(CameraClass::Main)]
+                         : g_lastMain.set                             ? &g_lastMain
+                                                                      : nullptr;
+    place(skin, d.view, view ? &view->view : nullptr);
+  }
+  if (g_drawLog && skinned && !geometry->mesh.vertices.empty()) {
+    // Where the first vertex lands (drawLog): its bones, blended.
+    const Mesh &m = geometry->mesh;
+    const float *p = m.vertices[0].position;
+    float world[3] = {};
+    if (skin.single >= 0) {
+      for (int c = 0; c < 3; ++c)
+        world[c] = p[0] * skin.singleMatrix.m[0][c] + p[1] * skin.singleMatrix.m[1][c] +
+                   p[2] * skin.singleMatrix.m[2][c] + skin.singleMatrix.m[3][c];
+    } else {
+      for (uint32_t k = 0; k < skin.bonesPerVertex; ++k) {
+        const float w = skin.weights[k];
+        const auto &t = skin.bones[skin.indices[k]].matrix;
+        for (int r = 0; r < 3; ++r)
+          world[r] += w * (t[r][0] * p[0] + t[r][1] * p[1] + t[r][2] * p[2] + t[r][3]);
+      }
+    }
+    char line[256];
+    std::snprintf(line, sizeof(line),
+                  "  skinned: %u per vertex, %zu bones, single %d, first index %u, vertex (%.1f %.1f %.1f) -> "
+                  "(%.1f %.1f %.1f), camera %d\n",
+                  skin.bonesPerVertex, skin.bones.size(), skin.single, skin.indices.empty() ? 0u : skin.indices[0],
+                  p[0], p[1], p[2], world[0], world[1], world[2], int(camera));
+    std::fputs(line, g_drawLog);
+  }
   if (updatesCamera && camera != CameraClass::Unknown) {
     Camera &c = g_cameras[size_t(camera)];
     if (!c.set) {
@@ -777,12 +838,21 @@ void lights(const std::vector<D3DLIGHT9> &enabled) {
     addLight(light);
 }
 
-bool draw(const Draw &d, DrawKind kind) {
+bool loggingDraws() { return g_drawLog != nullptr; }
+void logDraw(const char *line) {
+  if (g_drawLog)
+    std::fputs(line, g_drawLog);
+}
+
+bool draw(const Draw &d, DrawKind kind, const char **why) {
   if (!g_active)
     return false;
+  g_leftBecause = "";
   perf::Timer timer(perf::g_counters.translate);
   const bool taken = (kind == DrawKind::World && worldDraw(d)) || (kind == DrawKind::Ui && uiDraw(d));
   // A draw the translator could not read stays the real device's.
+  if (why && !taken && (kind == DrawKind::World || kind == DrawKind::Ui))
+    *why = *g_leftBecause ? g_leftBecause : "not decodable";
   const size_t counted = size_t(taken || kind == DrawKind::Skip ? kind : DrawKind::Forward);
   ++g_kinds[counted];
   ++perf::g_counters.kinds[counted];
@@ -890,6 +960,14 @@ void present(uint32_t width, uint32_t height) {
   if (!g_config.hashLog.empty() && g_frame % 600 == 0)
     writeHashLog();
   ++g_frame;
+  // The next frame's draws, described (openremix.drawLog).
+  if (g_drawLog) {
+    std::fclose(g_drawLog);
+    g_drawLog = nullptr;
+    log("draw log written: %s", g_config.drawLog.c_str());
+  }
+  if (!g_config.drawLog.empty() && g_frame == g_config.drawLogFrame)
+    g_drawLog = std::fopen(g_config.drawLog.c_str(), "w");
 }
 
 void setFullscreen(bool fullscreen) {

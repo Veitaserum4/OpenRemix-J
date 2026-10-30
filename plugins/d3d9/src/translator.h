@@ -24,7 +24,13 @@ void textureFilled(uint64_t hash, D3DFORMAT format, uint32_t width, uint32_t hei
 
 // A classified draw. True when the translator took it (World or Ui) into the
 // frame; false leaves it to the real device.
-bool draw(const Draw &draw, DrawKind kind);
+// `why`, when given, receives why a draw the translator could not take was
+// left (openremix.drawLog).
+bool draw(const Draw &draw, DrawKind kind, const char **why = nullptr);
+
+// openremix.drawLog: whether this frame's draws are logged, and a line.
+bool loggingDraws();
+void logDraw(const char *line);
 
 // The device's enabled fixed-function lights, as the light state changed and
 // at least once a frame (dxvk-remix emitDirtyLights): each is lit this frame.

@@ -21,7 +21,8 @@ enum class DrawKind {
 // skips such draws.
 bool selectTexture(Draw &draw, const Config &config);
 
-DrawKind classify(const Draw &draw, const Config &config, bool pretransformed);
+// `reason`, when given, says why (openremix.drawLog).
+DrawKind classify(const Draw &draw, const Config &config, bool pretransformed, const char **reason = nullptr);
 
 const char *kindName(DrawKind kind);
 

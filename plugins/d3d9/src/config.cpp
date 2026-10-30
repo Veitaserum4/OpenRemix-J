@@ -196,6 +196,10 @@ void parseConfig(const std::string &text, Config &c) {
       c.screenshotFrame = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
     } else if (key == "openremix.hashLog") {
       c.hashLog = value;
+    } else if (key == "openremix.drawLog") {
+      c.drawLog = value;
+    } else if (key == "openremix.drawLogFrame") {
+      c.drawLogFrame = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
     } else if (key == "openremix.screenshotAfterActive") {
       c.screenshotAfterActive = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
     } else if (key.rfind("rtx.", 0) == 0) {
