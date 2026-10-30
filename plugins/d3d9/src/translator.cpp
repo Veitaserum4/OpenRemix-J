@@ -81,9 +81,9 @@ std::vector<UiVertex> g_uiVertices;
 std::vector<uint32_t> g_uiIndices;
 std::vector<UiCommand> g_uiCommands;
 uint32_t g_kinds[4] = {}; // draws per DrawKind this frame
-// openremix.hashLog: the material textures and replacement keys seen, and
-// for each key its geometry asset hash and texture.
-std::set<uint64_t> g_seenTextures;
+// openremix.hashLog: the material textures, replacement keys (each with its
+// geometry asset hash and texture) and lights seen.
+std::set<uint64_t> g_seenTextures, g_seenLights;
 std::map<uint64_t, std::pair<uint64_t, uint64_t>> g_seenReplacements;
 
 void writeHashLog() {
@@ -95,6 +95,8 @@ void writeHashLog() {
   for (const auto &[key, parts] : g_seenReplacements)
     std::fprintf(file, "mesh %016llX asset %016llX texture %016llX\n", static_cast<unsigned long long>(key),
                  static_cast<unsigned long long>(parts.first), static_cast<unsigned long long>(parts.second));
+  for (uint64_t hash : g_seenLights)
+    std::fprintf(file, "light %016llX\n", static_cast<unsigned long long>(hash));
   std::fclose(file);
 }
 
@@ -238,10 +240,38 @@ uint64_t material(const Draw &d) {
 }
 
 // --- Lights -----------------------------------------------------------------
-uint64_t lightHash(const D3DLIGHT9 &l) { return XXH3_64bits(&l, sizeof(l)); }
+// dxvk-remix's stable hash of a D3D9 light (LightData::createFromPointSpot,
+// createFromDirectional): what a mod's light_<hash> overrides name. Radiance
+// is left out; a point or spot light hashes as a sphere light of the legacy
+// radius 4, a directional light as a rect light (a dxvk-remix bug kept for
+// compatibility) with the legacy half angle.
+uint64_t lightHash(const D3DLIGHT9 &l) {
+  constexpr uint64_t kSphere = 0, kRect = 1;
+  if (l.Type == D3DLIGHT_DIRECTIONAL) {
+    const float halfAngle = 0.0349f / 2.0f;
+    uint64_t h = XXH64(&l.Direction, sizeof(l.Direction), kRect);
+    return XXH64(&halfAngle, sizeof(halfAngle), h);
+  }
+  uint64_t shaping = 0;
+  if (l.Type == D3DLIGHT_SPOT) {
+    const float coneAngle = l.Phi / 2.0f;
+    const float cosConeAngle = std::cos(coneAngle);
+    const float softness = std::cos(l.Theta / 2.0f) - std::cos(coneAngle);
+    shaping = XXH64(&l.Direction, sizeof(l.Direction), shaping);
+    shaping = XXH64(&cosConeAngle, sizeof(cosConeAngle), shaping);
+    shaping = XXH64(&softness, sizeof(softness), shaping);
+    shaping = XXH64(&l.Falloff, sizeof(l.Falloff), shaping);
+  }
+  const float legacyRadius = 4.0f;
+  uint64_t h = XXH64(&l.Position, sizeof(l.Position), kSphere);
+  h = XXH64(&legacyRadius, sizeof(legacyRadius), h);
+  return XXH64(&h, sizeof(h), shaping);
+}
 
 void addLight(const D3DLIGHT9 &l) {
   const uint64_t hash = lightHash(l);
+  if (!g_config.hashLog.empty())
+    g_seenLights.insert(hash);
   if (g_config.ignoreLights.count(hash))
     return;
   auto [it, created] = g_lights.try_emplace(hash, g_frame);
@@ -610,9 +640,6 @@ bool worldDraw(const Draw &d) {
   // Additive draws (glows, flares) have no surface to trace.
   desc.rasterOnly = desc.blend.alphaBlendEnabled && desc.blend.dstColorBlendFactor == 1;
   g_instances.push_back(std::move(instance));
-  if (!d.vertexShader && d.renderStates[D3DRS_LIGHTING])
-    for (uint32_t i = 0; i < d.lightCount; ++i)
-      addLight(d.lights[i].light);
   return true;
 }
 
@@ -741,6 +768,13 @@ void textureFilled(uint64_t hash, D3DFORMAT format, uint32_t width, uint32_t hei
   ++perf::g_counters.textures;
   perf::g_counters.textureBytes += packed.size();
   renderer().storeTexture(hash, uint32_t(format), width, height, packed.data(), packed.size());
+}
+
+void lights(const std::vector<D3DLIGHT9> &enabled) {
+  if (!g_active)
+    return;
+  for (const D3DLIGHT9 &light : enabled)
+    addLight(light);
 }
 
 bool draw(const Draw &d, DrawKind kind) {

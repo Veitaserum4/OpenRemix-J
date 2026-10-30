@@ -31,12 +31,6 @@ constexpr uint32_t kStages = 8;
 
 struct ShaderCode;
 
-// An enabled fixed-function light (SetLight + LightEnable).
-struct Light {
-  DWORD index;
-  D3DLIGHT9 light;
-};
-
 // A texture stage as the draw sees it.
 struct Stage {
   uint64_t hash = 0;        // the texture's dxvk-remix hash (0: none, or not hashable)
@@ -88,8 +82,6 @@ struct Draw {
   D3DVIEWPORT9 viewport = {};
   uint32_t renderStates[256] = {};
   D3DMATERIAL9 material = {};
-  const Light *lights = nullptr; // enabled lights (D3DRS_LIGHTING on)
-  uint32_t lightCount = 0;
   // Fixed-function vertex blending: the device's world matrices
   // (D3DTS_WORLDMATRIX(n)), read on demand.
   IDirect3DDevice9 *device = nullptr;
