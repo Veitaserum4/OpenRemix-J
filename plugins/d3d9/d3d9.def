@@ -1,0 +1,13 @@
+LIBRARY d3d9.dll
+EXPORTS
+  Direct3DCreate9 = PluginDirect3DCreate9
+  Direct3DCreate9Ex = PluginDirect3DCreate9Ex
+  D3DPERF_BeginEvent = PluginD3DPERF_BeginEvent
+  D3DPERF_EndEvent = PluginD3DPERF_EndEvent
+  D3DPERF_GetStatus = PluginD3DPERF_GetStatus
+  D3DPERF_QueryRepeatFrame = PluginD3DPERF_QueryRepeatFrame
+  D3DPERF_SetMarker = PluginD3DPERF_SetMarker
+  D3DPERF_SetOptions = PluginD3DPERF_SetOptions
+  D3DPERF_SetRegion = PluginD3DPERF_SetRegion
+  Direct3D9EnableMaximizedWindowedModeShim = PluginDirect3D9EnableMaximizedWindowedModeShim
+  Direct3DShaderValidatorCreate9 = PluginDirect3DShaderValidatorCreate9
