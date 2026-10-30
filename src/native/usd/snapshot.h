@@ -7,7 +7,13 @@
 namespace remix::usd {
   using Json = nlohmann::json;
   namespace fs = std::filesystem;
-  Json compose_scene(const pxr::UsdStageRefPtr &, uint64_t);
+  // What compose_scene composes: the whole stage, or the subtree at `root`;
+  // meshes under `deferMeshesUnder` left out (composed later by root).
+  struct ComposeScope {
+    std::string root;
+    std::string deferMeshesUnder;
+  };
+  Json compose_scene(const pxr::UsdStageRefPtr &, uint64_t, const ComposeScope &scope = {});
   Json compose_lights(const pxr::UsdStageRefPtr &, uint64_t);
   Json compose_material(const pxr::UsdPrim &);
   std::string resolved_texture_path(const pxr::UsdPrim &, const char *);
