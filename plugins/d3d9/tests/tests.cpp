@@ -6,10 +6,14 @@
 #include "formats.h"
 #include "hash.h"
 #include "vertex.h"
+#include "vertex_capture.h"
+
+#include <d3dcompiler.h>
 
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -457,6 +461,156 @@ void profilesLayering() {
   std::filesystem::remove_all(dir);
 }
 
+// The same shader compiled for vs_1_1, vs_2_0 and vs_3_0 (vs_1_1 and vs_2_0
+// translated to vs_3_0), run by vertex capture on Direct3D's software vertex
+// processor: each gives the clip-space positions computed here. It reads a
+// constant by a relative address (vs_1_1: mov a0; vs_2_0: mova) and uses
+// sincos (vs_2_0's takes helper constants). Skipped without a D3D9 device or
+// d3dcompiler_47.dll.
+void vertexCaptureModels() {
+  static const char kSource[] = R"(
+float4x4 m : register(c0);
+float4 offsets[4] : register(c4);
+struct I { float3 p : POSITION; float2 uv : TEXCOORD0; float index : TEXCOORD1; };
+struct O { float4 p : POSITION; float4 c : COLOR0; float2 uv : TEXCOORD0; };
+O main(I i) {
+  O o;
+  float3 p = i.p + offsets[(int)i.index].xyz;
+  float s, c;
+  sincos(i.uv.x, s, c);
+  p.y += s * 0.5;
+  o.p = mul(float4(p, 1), m);
+  o.c = float4(1, 0.5, 0.25, 1);
+  o.uv = i.uv * 2;
+  return o;
+}
+)";
+  HMODULE library = LoadLibraryW(L"d3dcompiler_47.dll");
+  auto compile = library ? reinterpret_cast<pD3DCompile>(GetProcAddress(library, "D3DCompile")) : nullptr;
+  // The system's d3d9.dll: the plugin built next to this executable would
+  // load in its place.
+  wchar_t system[MAX_PATH];
+  GetSystemDirectoryW(system, MAX_PATH);
+  using Create = IDirect3D9 *(WINAPI *)(UINT);
+  HMODULE d3d9 = LoadLibraryW((std::wstring(system) + L"\\d3d9.dll").c_str());
+  auto create = d3d9 ? reinterpret_cast<Create>(GetProcAddress(d3d9, "Direct3DCreate9")) : nullptr;
+  IDirect3D9 *d3d = create ? create(D3D_SDK_VERSION) : nullptr;
+  HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 64, 64, nullptr, nullptr, nullptr, nullptr);
+  D3DPRESENT_PARAMETERS pp = {};
+  pp.Windowed = TRUE;
+  pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+  pp.hDeviceWindow = window;
+  IDirect3DDevice9 *game = nullptr;
+  if (!compile || !d3d ||
+      FAILED(d3d->CreateDevice(0, D3DDEVTYPE_HAL, window, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &game))) {
+    std::printf("vertex capture test skipped (no D3D9 device or d3dcompiler_47.dll)\n");
+    if (d3d)
+      d3d->Release();
+    return;
+  }
+
+  struct In {
+    float x, y, z, u, v, index;
+  };
+  const In vertices[4] = {{0, 0, 1, 0.1f, 0, 0}, {1, 0, 2, 0.7f, 0, 1}, {0, 1, 3, 1.3f, 1, 2}, {1, 1, 4, 2.1f, 1, 3}};
+  const std::vector<D3DVERTEXELEMENT9> elements = {{0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0},
+                                                   {0, 12, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0},
+                                                   {0, 20, D3DDECLTYPE_FLOAT1, 0, D3DDECLUSAGE_TEXCOORD, 1},
+                                                   D3DDECL_END()};
+  // A perspective-like matrix (w from z), row-vector convention, and offsets.
+  const float m[4][4] = {{1.5f, 0, 0, 0}, {0, 2, 0, 0}, {0.1f, 0.2f, 1.01f, 1}, {0.3f, -0.4f, -0.1f, 0}};
+  float constants[256 * 4] = {};
+  for (int r = 0; r < 4; ++r)
+    for (int c = 0; c < 4; ++c)
+      constants[r * 4 + c] = m[c][r]; // HLSL's column-major registers
+  const float offsets[4][3] = {{0, 0, 0}, {0.5f, 0, 0}, {0, 0.25f, 0}, {0, 0, 2}};
+  for (int i = 0; i < 4; ++i)
+    for (int k = 0; k < 3; ++k)
+      constants[(4 + i) * 4 + k] = offsets[i][k];
+  int integers[16 * 4] = {};
+  BOOL booleans[16] = {};
+
+  VertexCapture capture;
+  for (const char *profile : {"vs_1_1", "vs_2_0", "vs_3_0"}) {
+    ID3DBlob *code = nullptr, *errors = nullptr;
+    if (FAILED(compile(kSource, sizeof(kSource) - 1, "test", nullptr, nullptr, "main", profile, 0, 0, &code,
+                       &errors))) {
+      std::fprintf(stderr, "%s: %s\n", profile, errors ? static_cast<const char *>(errors->GetBufferPointer()) : "?");
+      ++g_failures;
+      continue;
+    }
+    const ShaderCode shader = parseShader(static_cast<const DWORD *>(code->GetBufferPointer()));
+    code->Release();
+    CHECK(!shader.model3.empty());
+    CHECK((shader.outputs & (kOutputColor | kOutputTexcoord)) == (kOutputColor | kOutputTexcoord));
+    Draw d;
+    d.device = game;
+    d.shader = &shader;
+    d.elements = elements.data();
+    d.declarationHash = 1;
+    d.streams[0] = {reinterpret_cast<const uint8_t *>(vertices), sizeof(vertices), 0, sizeof(In)};
+    d.constantsF = constants;
+    d.constantsI = integers;
+    d.constantsB = booleans;
+    std::vector<CapturedVertex> out;
+    const bool ran = capture.run(d, 0, 4, out);
+    CHECK(ran);
+    if (!ran)
+      continue;
+    float worst = 0;
+    for (int i = 0; i < 4; ++i) {
+      const In &v = vertices[i];
+      const float *o = offsets[int(v.index)];
+      const float p[4] = {v.x + o[0], v.y + o[1] + std::sin(v.u) * 0.5f, v.z + o[2], 1};
+      for (int c = 0; c < 4; ++c) {
+        const float expected = p[0] * m[0][c] + p[1] * m[1][c] + p[2] * m[2][c] + p[3] * m[3][c];
+        worst = std::max(worst, std::fabs(out[i].clip[c] - expected) / std::max(1.0f, std::fabs(expected)));
+      }
+      CHECK(std::fabs(out[i].texcoord[0] - v.u * 2) < 1e-3f && std::fabs(out[i].texcoord[1] - v.v * 2) < 1e-3f);
+      CHECK(out[i].color == 0xff4080ffu); // RGBA (1, 0.5, 0.25, 1), R in the low byte
+    }
+    // sincos is approximated in shader model 1 and 2.
+    if (worst > 2e-3f)
+      std::fprintf(stderr, "%s: clip positions off by %g\n", profile, worst);
+    CHECK(worst <= 2e-3f);
+  }
+  capture.release();
+  game->Release();
+  d3d->Release();
+  DestroyWindow(window);
+}
+
+void unprojection() {
+  // A world point through world, view and projection comes back.
+  D3DMATRIX world = {}, view = {}, projection = {};
+  for (int i = 0; i < 4; ++i)
+    world.m[i][i] = view.m[i][i] = 1;
+  world._41 = 3, world._11 = 2;
+  view._43 = 10, view._11 = 0, view._13 = 1, view._31 = -1, view._33 = 0; // a turn about y
+  projection._11 = 1.2f, projection._22 = 1.6f, projection._33 = 1.001f, projection._34 = 1, projection._43 = -0.1f;
+  const float object[4] = {0.5f, -1, 2, 1};
+  float clip[4] = {};
+  // object x world x view x projection
+  auto multiply = [](const D3DMATRIX &a, const D3DMATRIX &b) {
+    D3DMATRIX out = {};
+    for (int r = 0; r < 4; ++r)
+      for (int c = 0; c < 4; ++c)
+        for (int k = 0; k < 4; ++k)
+          out.m[r][c] += a.m[r][k] * b.m[k][c];
+    return out;
+  };
+  const D3DMATRIX all = multiply(multiply(world, view), projection);
+  for (int c = 0; c < 4; ++c)
+    clip[c] = object[0] * all.m[0][c] + object[1] * all.m[1][c] + object[2] * all.m[2][c] + all.m[3][c];
+  float back[3];
+  unproject(makeUnprojection(projection, view, world, true), clip, back);
+  CHECK(std::fabs(back[0] - object[0]) < 1e-4f && std::fabs(back[1] - object[1]) < 1e-4f &&
+        std::fabs(back[2] - object[2]) < 1e-4f);
+  // Without the world matrices: the world point.
+  unproject(makeUnprojection(projection, view, world, false), clip, back);
+  CHECK(std::fabs(back[0] - (object[0] * 2 + 3)) < 1e-4f);
+}
+
 void bridgeChannel() {
   using namespace bridge;
   const std::wstring name = channelName(GetCurrentProcessId()) + L"-test";
@@ -527,6 +681,8 @@ int main() {
   cameras();
   profilesLayering();
   bridgeChannel();
+  unprojection();
+  vertexCaptureModels();
   if (g_failures)
     std::fprintf(stderr, "%d check(s) failed\n", g_failures);
   else

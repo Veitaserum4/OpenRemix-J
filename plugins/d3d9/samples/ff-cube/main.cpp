@@ -1,12 +1,14 @@
 // A fixed-function D3D9 app to run the plugin against: a textured cube lit by
 // a point light, standing on a lit floor, a pyramid drawn without indices, a
-// column bent by vertex blending (two world matrices), a box held in front of
-// the camera with its own field of view (a view model), and a
+// column bent by vertex blending (two world matrices), a sheet a vertex shader
+// waves (vs_2_0, compiled with d3dcompiler_47.dll, for vertex capture), a box
+// held in front of the camera with its own field of view (a view model), and a
 // pre-transformed HUD bar. Runs for `--frames N` frames (default: until
 // closed).
 #include <windows.h>
 
 #include <d3d9.h>
+#include <d3dcompiler.h>
 
 #include <cmath>
 #include <cstdint>
@@ -34,6 +36,42 @@ struct HudVertex {
   D3DCOLOR color;
 };
 constexpr DWORD kHudFvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
+
+// The waving sheet's shader: the vertices rise and fall along x over time,
+// and the fixed-function transforms stay set (as vertex capture expects).
+constexpr char kWaveShader[] = R"(
+float4x4 worldViewProjection : register(c0);
+float time : register(c4);
+struct Input { float3 position : POSITION; float3 normal : NORMAL; float2 uv : TEXCOORD0; };
+struct Output { float4 position : POSITION; float4 color : COLOR0; float2 uv : TEXCOORD0; };
+Output main(Input input) {
+  Output output;
+  float3 p = input.position;
+  p.y += 0.35 * sin(p.x * 2.5 + time);
+  output.position = mul(float4(p, 1), worldViewProjection);
+  output.color = float4(1, 1, 1, 1);
+  output.uv = input.uv;
+  return output;
+}
+)";
+
+// Compiles a vs_2_0 shader with the system's HLSL compiler.
+IDirect3DVertexShader9 *compileVertexShader(IDirect3DDevice9 *device, const char *source) {
+  HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+  auto compile = compiler ? reinterpret_cast<pD3DCompile>(GetProcAddress(compiler, "D3DCompile")) : nullptr;
+  if (!compile)
+    return nullptr;
+  ID3DBlob *code = nullptr, *errors = nullptr;
+  if (FAILED(compile(source, std::strlen(source), "wave", nullptr, nullptr, "main", "vs_2_0", 0, 0, &code, &errors))) {
+    if (errors)
+      errors->Release();
+    return nullptr;
+  }
+  IDirect3DVertexShader9 *shader = nullptr;
+  device->CreateVertexShader(static_cast<const DWORD *>(code->GetBufferPointer()), &shader);
+  code->Release();
+  return shader;
+}
 
 LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_DESTROY) {
@@ -253,6 +291,35 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   std::memcpy(data, column, sizeof(column));
   columnVb->Unlock();
 
+  // The sheet: 24 x 24 quads over 4 x 4 units at (0, 0, 3.5), for the wave shader.
+  constexpr int kGrid = 24;
+  Vertex sheetVertices[(kGrid + 1) * (kGrid + 1)];
+  uint16_t sheetIndices[kGrid * kGrid * 6];
+  for (int z = 0; z <= kGrid; ++z)
+    for (int x = 0; x <= kGrid; ++x)
+      sheetVertices[z * (kGrid + 1) + x] = {-2 + 4.0f * x / kGrid, 0.6f, 1.5f + 4.0f * z / kGrid, 0, 1, 0,
+                                            float(x) / 4, float(z) / 4};
+  for (int z = 0, at = 0; z < kGrid; ++z)
+    for (int x = 0; x < kGrid; ++x) {
+      const uint16_t a = uint16_t(z * (kGrid + 1) + x), b = uint16_t(a + 1), c = uint16_t(a + kGrid + 1),
+                     e = uint16_t(c + 1);
+      const uint16_t quad[6] = {a, c, b, b, c, e};
+      for (uint16_t index : quad)
+        sheetIndices[at++] = index;
+    }
+  IDirect3DVertexBuffer9 *sheetVb = nullptr;
+  IDirect3DIndexBuffer9 *sheetIb = nullptr;
+  device->CreateVertexBuffer(sizeof(sheetVertices), D3DUSAGE_WRITEONLY, kVertexFvf, D3DPOOL_MANAGED, &sheetVb, nullptr);
+  device->CreateIndexBuffer(sizeof(sheetIndices), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_MANAGED, &sheetIb,
+                            nullptr);
+  sheetVb->Lock(0, 0, &data, 0);
+  std::memcpy(data, sheetVertices, sizeof(sheetVertices));
+  sheetVb->Unlock();
+  sheetIb->Lock(0, 0, &data, 0);
+  std::memcpy(data, sheetIndices, sizeof(sheetIndices));
+  sheetIb->Unlock();
+  IDirect3DVertexShader9 *wave = compileVertexShader(device, kWaveShader);
+
   D3DLIGHT9 light = {};
   light.Type = D3DLIGHT_POINT;
   light.Diffuse = {1.0f, 0.9f, 0.7f, 1};
@@ -322,6 +389,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, 24, 0, 12);
     device->SetRenderState(D3DRS_VERTEXBLEND, D3DVBF_DISABLE);
 
+    // The sheet, waved by its vertex shader (constants: the transposed
+    // world-view-projection in c0-c3, the time in c4).
+    if (wave) {
+      const D3DMATRIX wvp = multiply(multiply(world, view), projection);
+      float constants[5][4] = {};
+      for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+          constants[r][c] = wvp.m[c][r];
+      constants[4][0] = frame * 0.03f;
+      device->SetTransform(D3DTS_WORLD, &world);
+      device->SetVertexShader(wave);
+      device->SetVertexShaderConstantF(0, &constants[0][0], 5);
+      device->SetFVF(kVertexFvf);
+      device->SetStreamSource(0, sheetVb, 0, sizeof(Vertex));
+      device->SetIndices(sheetIb);
+      device->SetTexture(0, checker);
+      device->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, (kGrid + 1) * (kGrid + 1), 0, kGrid * kGrid * 2);
+      device->SetVertexShader(nullptr);
+      device->SetIndices(ib);
+    }
+
     // A view model: a small box held in front of the camera (placed in view
     // space, drawn with the camera's view) with its own field of view.
     D3DMATRIX shrink = identity();
@@ -356,6 +444,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   plain->Release();
   pyramidVb->Release();
   columnVb->Release();
+  sheetVb->Release();
+  sheetIb->Release();
+  if (wave)
+    wave->Release();
   vb->Release();
   ib->Release();
   device->Release();

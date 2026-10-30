@@ -2,15 +2,21 @@
 
 #include "camera.h"
 #include "hash.h"
+#include "hooks.h"
 #include "log.h"
+#include "perf.h"
 #include "renderer.h"
 #include "vertex.h"
+#include "vertex_capture.h"
 
 #include <remix/remix_native_ext.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <map>
+#include <set>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,10 +74,29 @@ struct Geometry {
 constexpr size_t kMemoEntries = 16384;
 std::unordered_map<uint64_t, std::shared_ptr<const Geometry>> g_memo;
 uint32_t g_memoHits = 0, g_memoMisses = 0;
+// Vertex capture's private device (device thread).
+VertexCapture g_capture;
+uint32_t g_captured = 0, g_captureFailures = 0;
 std::vector<UiVertex> g_uiVertices;
 std::vector<uint32_t> g_uiIndices;
 std::vector<UiCommand> g_uiCommands;
 uint32_t g_kinds[4] = {}; // draws per DrawKind this frame
+// openremix.hashLog: the material textures and replacement keys seen, and
+// for each key its geometry asset hash and texture.
+std::set<uint64_t> g_seenTextures;
+std::map<uint64_t, std::pair<uint64_t, uint64_t>> g_seenReplacements;
+
+void writeHashLog() {
+  FILE *file = std::fopen(g_config.hashLog.c_str(), "w");
+  if (!file)
+    return;
+  for (uint64_t hash : g_seenTextures)
+    std::fprintf(file, "texture %016llX\n", static_cast<unsigned long long>(hash));
+  for (const auto &[key, parts] : g_seenReplacements)
+    std::fprintf(file, "mesh %016llX asset %016llX texture %016llX\n", static_cast<unsigned long long>(key),
+                 static_cast<unsigned long long>(parts.first), static_cast<unsigned long long>(parts.second));
+  std::fclose(file);
+}
 
 // --- Matrices (D3D row vectors: v' = v * M) ---------------------------------
 D3DMATRIX multiply(const D3DMATRIX &a, const D3DMATRIX &b) {
@@ -277,8 +302,9 @@ void addLight(const D3DLIGHT9 &l) {
 
 // --- World draws ------------------------------------------------------------
 // The draw's memoization key, or 0 when it reads data no buffer version
-// covers (UP draws).
-uint64_t memoKey(const Draw &d) {
+// covers (UP draws). Without `shaderState`: the same draw whatever its
+// shader's constants and transforms (a captured draw's identity).
+uint64_t memoKey(const Draw &d, bool shaderState = true) {
   uint32_t used = 0;
   for (const D3DVERTEXELEMENT9 *e = d.elements; e->Stream != 0xff; ++e)
     if (e->Stream < kStreams)
@@ -302,7 +328,78 @@ uint64_t memoKey(const Draw &d) {
   }
   const uint32_t draw[6] = {uint32_t(d.type), d.startVertex, d.startIndex, d.primCount,
                             d.stage0()[D3DTSS_TEXCOORDINDEX] & 7, d.indexed};
-  return XXH3_64bits_withSeed(draw, sizeof(draw), key) | 1;
+  key = XXH3_64bits_withSeed(draw, sizeof(draw), key);
+  // A captured draw's vertices are its shader's, from its constants, taken
+  // back through its transforms.
+  if (d.shader) {
+    key = XXH3_64bits_withSeed(&d.shader->hash, sizeof(d.shader->hash), key);
+    if (shaderState) {
+      key = XXH3_64bits_withSeed(&d.constantsHash, sizeof(d.constantsHash), key);
+      const D3DMATRIX transforms[3] = {d.world, d.view, d.projection};
+      key = XXH3_64bits_withSeed(transforms, sizeof(transforms), key);
+      key = XXH3_64bits_withSeed(&d.pixelShader, sizeof(d.pixelShader), key);
+    }
+  }
+  return key | 1;
+}
+
+// Captured draws' latest meshes, by the draw's identity: an animated shader
+// makes a mesh each frame, and the one it replaces goes at once instead of
+// after kUnusedFrames.
+struct CapturedMesh {
+  uint64_t mesh = 0, frame = 0;
+};
+std::unordered_map<uint64_t, CapturedMesh> g_capturedMeshes;
+
+void replaceCapturedMesh(const Draw &d, uint64_t mesh) {
+  const uint64_t identity = memoKey(d, false);
+  if (!identity)
+    return;
+  CapturedMesh &owner = g_capturedMeshes[identity];
+  if (owner.mesh && owner.mesh != mesh)
+    if (auto it = g_meshes.find(owner.mesh); it != g_meshes.end() && it->second < g_frame) {
+      renderer().destroyMesh(it->first);
+      g_meshes.erase(it);
+    }
+  owner = {mesh, g_frame};
+}
+
+// A vertex shader's draw (rtx.useVertexCapture): its decoded input vertices
+// take the shader's output positions, back in object space (Remix Plus
+// emitVertexCaptureOp), and with rtx.useVertexCapturedTexcoords (or when the
+// input has none) its texture coordinates; its colours without a pixel
+// shader. The asset hash stays the input positions', as in dxvk-remix.
+bool captureVertices(const Draw &d, const Triangles &t, Mesh &mesh) {
+  perf::Timer timer(perf::g_counters.vertexCapture);
+  const Unprojection unprojection =
+      makeUnprojection(d.projection, d.view, d.world, g_config.useWorldMatricesForShaders);
+  std::vector<CapturedVertex> captured;
+  bool ran;
+  {
+    hooks::InternalCalls internal;
+    ran = unprojection.valid && g_capture.run(d, t.low, t.high - t.low + 1, captured);
+  }
+  if (!ran) {
+    ++g_captureFailures;
+    return false;
+  }
+  ++g_captured;
+  const BYTE set = BYTE(d.stage0()[D3DTSS_TEXCOORDINDEX] & 7);
+  const bool texcoords = (d.shader->outputs & kOutputTexcoord) &&
+                         (g_config.useVertexCapturedTexcoords || !findElement(d.elements, D3DDECLUSAGE_TEXCOORD, set));
+  const bool colors = (d.shader->outputs & kOutputColor) && !d.pixelShader;
+  for (size_t i = 0; i < mesh.vertices.size(); ++i) {
+    Vertex &v = mesh.vertices[i];
+    const CapturedVertex &c = captured[i];
+    unproject(unprojection, c.clip, v.position);
+    if (texcoords)
+      v.texcoord[0] = c.texcoord[0], v.texcoord[1] = c.texcoord[1];
+    if (!g_config.useVertexCapturedNormals)
+      v.normal[0] = v.normal[1] = v.normal[2] = 0;
+    if (colors)
+      v.color = c.color;
+  }
+  return true;
 }
 
 // The draw's decoded geometry and asset hash, from the memo when it can be.
@@ -315,6 +412,7 @@ std::shared_ptr<const Geometry> geometryFor(const Draw &d) {
       return it->second;
     }
   ++g_memoMisses;
+  perf::Timer timer(perf::g_counters.geometry);
   auto g = std::make_shared<Geometry>();
   Triangles triangles;
   bool degenerate = false;
@@ -322,6 +420,8 @@ std::shared_ptr<const Geometry> geometryFor(const Draw &d) {
     return nullptr;
   g->asset = geometryHash(d, g_config.assetHashRule, &degenerate);
   if (degenerate)
+    return nullptr;
+  if (d.shader && !captureVertices(d, triangles, g->mesh))
     return nullptr;
   const Mesh &m = g->mesh;
   uint64_t content = XXH3_64bits(m.vertices.data(), m.vertices.size() * sizeof(Vertex));
@@ -351,7 +451,7 @@ struct Skin {
 
 bool skinning(const Draw &d, const Mesh &m, Skin &out) {
   const DWORD blend = d.renderStates[D3DRS_VERTEXBLEND];
-  if (blend == D3DVBF_DISABLE || blend == D3DVBF_TWEENING || !d.device)
+  if (d.vertexShader || blend == D3DVBF_DISABLE || blend == D3DVBF_TWEENING || !d.device)
     return false;
   const uint32_t given = blend == D3DVBF_0WEIGHTS ? 0 : uint32_t(blend);
   if (given > 3 || given > m.weightCount)
@@ -444,7 +544,7 @@ bool worldDraw(const Draw &d) {
   const Mesh &mesh = geometry->mesh;
   bool recolor = false;
   uint32_t color = 0;
-  if (d.renderStates[D3DRS_LIGHTING] &&
+  if (!d.vertexShader && d.renderStates[D3DRS_LIGHTING] &&
       !(d.renderStates[D3DRS_COLORVERTEX] && mesh.colors &&
         d.renderStates[D3DRS_DIFFUSEMATERIALSOURCE] == D3DMCS_COLOR1)) {
     recolor = true;
@@ -457,6 +557,8 @@ bool worldDraw(const Draw &d) {
   const uint64_t key = XXH3_64bits(keyFields, sizeof(keyFields));
   auto [it, created] = g_meshes.try_emplace(key, g_frame);
   it->second = g_frame;
+  if (d.shader)
+    replaceCapturedMesh(d, key);
   if (created) {
     std::vector<Vertex> vertices = mesh.vertices;
     if (recolor)
@@ -470,6 +572,8 @@ bool worldDraw(const Draw &d) {
     }
     renderer().createMesh(key, vertices.data(), uint32_t(vertices.size()), mesh.indices.data(),
                           uint32_t(mesh.indices.size()), materialHash, blend);
+    ++perf::g_counters.meshes;
+    perf::g_counters.meshBytes += vertices.size() * sizeof(Vertex) + mesh.indices.size() * 4;
   }
 
   Instance instance = {};
@@ -477,7 +581,10 @@ bool worldDraw(const Draw &d) {
   desc.mesh = key;
   // Skinned vertices go to the world through their bones.
   static const D3DMATRIX identity = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}};
-  transformOf(skin.single >= 0 ? skin.singleMatrix : skinMesh ? identity : d.world, desc.transform);
+  // A captured draw's vertices are in object space, or in world space without
+  // rtx.useWorldMatricesForShaders.
+  const bool worldSpace = d.shader && !g_config.useWorldMatricesForShaders;
+  transformOf(skin.single >= 0 ? skin.singleMatrix : skinMesh || worldSpace ? identity : d.world, desc.transform);
   if (skinMesh) {
     instance.bones = std::move(skin.bones);
     desc.boneCount = uint32_t(instance.bones.size());
@@ -490,6 +597,12 @@ bool worldDraw(const Draw &d) {
   desc.blend = blendState(d);
   // The USD mesh replacement key (dxvk-remix DrawCallState::getHash).
   desc.replacement = geometry->asset ? geometry->asset ^ d.texture0 : 0;
+  if (!g_config.hashLog.empty()) {
+    if (d.texture0)
+      g_seenTextures.insert(d.texture0);
+    if (desc.replacement)
+      g_seenReplacements.try_emplace(desc.replacement, geometry->asset, d.texture0);
+  }
   // Double-sided whatever D3DRS_CULLMODE says: the raster backend takes
   // clockwise faces as front (D3D's screen-space rule), the path tracer
   // decides in object space, where a left-handed D3D world's are reversed.
@@ -497,7 +610,7 @@ bool worldDraw(const Draw &d) {
   // Additive draws (glows, flares) have no surface to trace.
   desc.rasterOnly = desc.blend.alphaBlendEnabled && desc.blend.dstColorBlendFactor == 1;
   g_instances.push_back(std::move(instance));
-  if (d.renderStates[D3DRS_LIGHTING])
+  if (!d.vertexShader && d.renderStates[D3DRS_LIGHTING])
     for (uint32_t i = 0; i < d.lightCount; ++i)
       addLight(d.lights[i].light);
   return true;
@@ -578,6 +691,11 @@ bool uiDraw(const Draw &d) {
 
 // Destroys the meshes and lights no frame used for kUnusedFrames.
 void collect() {
+  for (auto it = g_capturedMeshes.begin(); it != g_capturedMeshes.end();)
+    if (g_frame - it->second.frame > kUnusedFrames)
+      it = g_capturedMeshes.erase(it);
+    else
+      ++it;
   for (auto it = g_meshes.begin(); it != g_meshes.end();)
     if (g_frame - it->second > kUnusedFrames) {
       renderer().destroyMesh(it->first);
@@ -608,6 +726,10 @@ bool start(HWND window, const Config &config, const std::filesystem::path &plugi
 bool active() { return g_active && renderer().alive(); }
 
 void shutdown() {
+  {
+    hooks::InternalCalls internal;
+    g_capture.release();
+  }
   if (!g_active)
     return;
   g_active = false;
@@ -616,21 +738,52 @@ void shutdown() {
 
 void textureFilled(uint64_t hash, D3DFORMAT format, uint32_t width, uint32_t height,
                    const std::vector<uint8_t> &packed) {
+  ++perf::g_counters.textures;
+  perf::g_counters.textureBytes += packed.size();
   renderer().storeTexture(hash, uint32_t(format), width, height, packed.data(), packed.size());
 }
 
 bool draw(const Draw &d, DrawKind kind) {
   if (!g_active)
     return false;
+  perf::Timer timer(perf::g_counters.translate);
   const bool taken = (kind == DrawKind::World && worldDraw(d)) || (kind == DrawKind::Ui && uiDraw(d));
   // A draw the translator could not read stays the real device's.
-  ++g_kinds[size_t(taken || kind == DrawKind::Skip ? kind : DrawKind::Forward)];
+  const size_t counted = size_t(taken || kind == DrawKind::Skip ? kind : DrawKind::Forward);
+  ++g_kinds[counted];
+  ++perf::g_counters.kinds[counted];
   return taken;
+}
+
+// Every few seconds: the frame rate and where the frames' time went.
+void reportPerformance() {
+  static int64_t since = perf::now();
+  static uint64_t sinceFrame = g_frame;
+  const int64_t now = perf::now();
+  const double elapsed = perf::milliseconds(now - since);
+  if (elapsed < 2000)
+    return;
+  perf::Counters &c = perf::g_counters;
+  const double frames = double(g_frame - sinceFrame);
+  auto per = [&](int64_t ticks) { return perf::milliseconds(ticks) / frames; };
+  log("performance, frames %llu-%llu: %.1f fps, %.1f ms a frame; per frame: draws %.0f (%.0f forwarded, %.0f skipped, %.0f UI, %.0f world) taking %.2f ms "
+      "(translator %.2f, decoding %.2f, vertex capture %.2f), texture reads %.2f ms, present %.2f ms, "
+      "bridge sends %.2f ms; %.1f meshes (%.1f KB), %.1f textures (%.1f KB), %.1f KB sent; %zu live meshes",
+      static_cast<unsigned long long>(sinceFrame), static_cast<unsigned long long>(g_frame), frames * 1000 / elapsed,
+      elapsed / frames, c.draws / frames, c.kinds[0] / frames, c.kinds[1] / frames, c.kinds[2] / frames,
+      c.kinds[3] / frames, per(c.capture), per(c.translate), per(c.geometry), per(c.vertexCapture),
+      per(c.textureRead), per(c.present), per(c.send), c.meshes / frames, c.meshBytes / frames / 1024,
+      c.textures / frames, c.textureBytes / frames / 1024, c.sentBytes / frames / 1024, g_meshes.size());
+  c = {};
+  since = now;
+  sinceFrame = g_frame;
 }
 
 void present(uint32_t width, uint32_t height) {
   if (!g_active)
     return;
+  reportPerformance();
+  perf::Timer timer(perf::g_counters.present);
   Renderer &r = renderer();
   // The frame's cameras; a frame without a Main camera keeps the last one.
   if (g_cameras[size_t(CameraClass::Main)].set)
@@ -663,9 +816,10 @@ void present(uint32_t width, uint32_t height) {
   if (g_frame <= 3 || g_frame % 1000 == 0) {
     const bool camera = g_cameras[size_t(CameraClass::Main)].set;
     log("frame %llu: %u forwarded, %u skipped, %u UI, %u world draws; %zu instances, %zu meshes, %zu lights; "
-        "geometry memo %u hits, %u misses%s%s%s",
+        "geometry memo %u hits, %u misses; %u shader draws captured, %u not%s%s%s",
         static_cast<unsigned long long>(g_frame), g_kinds[0], g_kinds[1], g_kinds[2], g_kinds[3],
-        g_instances.size(), g_meshes.size(), g_lights.size(), g_memoHits, g_memoMisses,
+        g_instances.size(), g_meshes.size(), g_lights.size(), g_memoHits, g_memoMisses, g_captured,
+        g_captureFailures,
         camera ? "" : ", no camera", g_cameras[size_t(CameraClass::ViewModel)].set ? ", view model" : "",
         g_cameras[size_t(CameraClass::Sky)].set ? ", sky camera" : "");
     if (g_frame % 1000 == 0) {
@@ -675,7 +829,7 @@ void present(uint32_t width, uint32_t height) {
     }
   }
   std::fill(std::begin(g_kinds), std::end(g_kinds), 0u);
-  g_memoHits = g_memoMisses = 0;
+  g_memoHits = g_memoMisses = g_captured = g_captureFailures = 0;
   bool screenshot = !g_config.screenshot.empty() && g_frame == g_config.screenshotFrame;
   if (!g_config.screenshot.empty() && g_config.screenshotAfterActive) {
     // The frame the requested backend became active, looked for every 30th.
@@ -699,6 +853,8 @@ void present(uint32_t width, uint32_t height) {
   g_cameraFrame.endFrame();
   g_fogSet = false;
   collect();
+  if (!g_config.hashLog.empty() && g_frame % 600 == 0)
+    writeHashLog();
   ++g_frame;
 }
 

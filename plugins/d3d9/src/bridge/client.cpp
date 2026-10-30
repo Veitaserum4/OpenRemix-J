@@ -3,6 +3,7 @@
 // channel; only Present waits, for a frame slot.
 #include "bridge/channel.h"
 #include "log.h"
+#include "perf.h"
 #include "renderer.h"
 
 #include <cstring>
@@ -184,6 +185,9 @@ private:
   bool send(uint16_t command, std::initializer_list<Channel::Part> parts) {
     if (!m_channel || m_channel->broken())
       return false;
+    perf::Timer timer(perf::g_counters.send);
+    for (const Channel::Part &part : parts)
+      perf::g_counters.sentBytes += part.size;
     if (m_channel->send(command, parts))
       return true;
     report();
@@ -205,9 +209,11 @@ private:
     if (self && self->m_started && forwarded(message) && self->alive()) {
       InputPacket input = {message, 0, uint64_t(w), uint64_t(int64_t(l))};
       self->send(kInput, {{&input, sizeof(input)}});
-      // OpenRemix's menu has the keyboard or mouse: the game does not see it.
+      // OpenRemix's menu is open or has the keyboard or mouse: the game does
+      // not see them (input_hooks.cpp hides what it polls).
       const RendererStatus &status = self->m_channel->state().status;
-      if ((status.guiWantsKeyboard && keyboardMessage(message)) || (status.guiWantsMouse && mouseMessage(message)))
+      if (((status.menuOpen || status.guiWantsKeyboard) && keyboardMessage(message)) ||
+          ((status.menuOpen || status.guiWantsMouse) && mouseMessage(message)))
         return 0;
     }
     return CallWindowProcW(self ? self->m_previousProc : DefWindowProcW, window, message, w, l);

@@ -97,8 +97,9 @@ bool selectTexture(Draw &d, const Config &c) {
 DrawKind classify(const Draw &d, const Config &c, bool pretransformed) {
   if (d.drawId < c.drawCallRangeFirst || d.drawId > c.drawCallRangeLast)
     return DrawKind::Skip;
-  // Vertex shaders are not captured yet (rtx.useVertexCapture).
-  if (d.vertexShader)
+  // A vertex shader's draw is captured (rtx.useVertexCapture) when its
+  // bytecode is known.
+  if (d.vertexShader && !d.shader)
     return DrawKind::Forward;
   if (!d.primCount ||
       (d.type != D3DPT_TRIANGLELIST && d.type != D3DPT_TRIANGLESTRIP && d.type != D3DPT_TRIANGLEFAN))
@@ -129,7 +130,7 @@ DrawKind classify(const Draw &d, const Config &c, bool pretransformed) {
       !d.renderStates[D3DRS_ZWRITEENABLE])
     return DrawKind::Skip;
   // UI: an orthographic projection without depth writes, or a UI texture.
-  if (c.orthographicIsUI && d.projection._44 == 1.0f && !d.renderStates[D3DRS_ZWRITEENABLE])
+  if (!d.vertexShader && c.orthographicIsUI && d.projection._44 == 1.0f && !d.renderStates[D3DRS_ZWRITEENABLE])
     return DrawKind::Ui;
   if (anyTextureIn(d, c.uiTextures))
     return DrawKind::Ui;

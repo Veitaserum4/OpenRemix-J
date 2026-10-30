@@ -87,6 +87,7 @@ struct RendererStatus {
   uint32_t started, failed;
   uint32_t requestedBackend, activeBackend, supportedBackends;
   uint32_t guiWantsKeyboard, guiWantsMouse;
+  uint32_t menuOpen; // OpenRemix's menu is shown
   uint64_t presented;
   char reason[256];
 };

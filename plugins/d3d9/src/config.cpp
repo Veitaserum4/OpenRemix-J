@@ -136,6 +136,14 @@ void parseConfig(const std::string &text, Config &c) {
       c.useObsoleteHashOnTextureUpload = boolean(value);
     } else if (key == "rtx.recomputeTextureHashOnWrite") {
       c.recomputeTextureHashOnWrite = boolean(value);
+    } else if (key == "rtx.useVertexCapture") {
+      c.useVertexCapture = boolean(value);
+    } else if (key == "rtx.useVertexCapturedNormals") {
+      c.useVertexCapturedNormals = boolean(value);
+    } else if (key == "rtx.useVertexCapturedTexcoords") {
+      c.useVertexCapturedTexcoords = boolean(value);
+    } else if (key == "rtx.useWorldMatricesForShaders") {
+      c.useWorldMatricesForShaders = boolean(value);
     } else if (key == "rtx.allowCubemaps") {
       c.allowCubemaps = boolean(value);
     } else if (key == "rtx.drawCallRange") {
@@ -186,6 +194,8 @@ void parseConfig(const std::string &text, Config &c) {
       c.screenshot = value;
     } else if (key == "openremix.screenshotFrame") {
       c.screenshotFrame = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
+    } else if (key == "openremix.hashLog") {
+      c.hashLog = value;
     } else if (key == "openremix.screenshotAfterActive") {
       c.screenshotAfterActive = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
     } else if (key.rfind("rtx.", 0) == 0) {

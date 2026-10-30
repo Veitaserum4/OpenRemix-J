@@ -39,6 +39,12 @@ struct Config {
   bool recomputeTextureHashOnWrite = false;    // a texture's hash follows its later writes
   bool allowCubemaps = false;
 
+  // Vertex capture (dxvk-remix d3d9_rtx.h).
+  bool useVertexCapture = true;            // vertex-shader draws are captured
+  bool useVertexCapturedNormals = true;    // their input normals are kept
+  bool useVertexCapturedTexcoords = false; // their output texcoords replace the input ones
+  bool useWorldMatricesForShaders = true;  // D3DTS_WORLD places them
+
   // Capture heuristics (dxvk-remix D3D9Rtx and the Remix Plus translator).
   uint32_t drawCallRangeFirst = 0, drawCallRangeLast = UINT32_MAX; // rtx.drawCallRange
   uint32_t skyDrawcallIdThreshold = 0; // untextured draws before this one are sky
@@ -63,6 +69,10 @@ struct Config {
   // openremix.screenshotAfterActive: instead, this many frames after the
   // requested backend became active (a path tracer prepares for a while).
   uint32_t screenshotAfterActive = 0;
+  // openremix.hashLog: a file listing the texture hashes and mesh replacement
+  // keys the game's draws had, rewritten every 600 frames (to check them
+  // against a mod's mesh_ and mat_ names).
+  std::string hashLog;
 };
 
 // Applies one file's `key = value` lines on top of `config`.

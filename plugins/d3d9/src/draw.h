@@ -29,6 +29,8 @@ struct IndexData {
 constexpr uint32_t kStreams = 8;
 constexpr uint32_t kStages = 8;
 
+struct ShaderCode;
+
 // An enabled fixed-function light (SetLight + LightEnable).
 struct Light {
   DWORD index;
@@ -57,6 +59,14 @@ struct Draw {
 
   uint32_t drawId = 0;       // this frame's draw count (rtx.drawCallRange, sky draw threshold)
   bool vertexShader = false; // a vertex shader is bound (not fixed function)
+  bool pixelShader = false;
+  // With rtx.useVertexCapture, a vertex shader's draw: its bytecode, the
+  // constants it reads (256 float4, 16 int4, 16 bool) and their hash.
+  const ShaderCode *shader = nullptr;
+  const float *constantsF = nullptr;
+  const int *constantsI = nullptr;
+  const BOOL *constantsB = nullptr;
+  uint64_t constantsHash = 0;
   bool occlusionQuery = false; // an occlusion query is open
   // Render target 0: the back buffer, or another surface of this size and format.
   bool target = true, backBuffer = true;

@@ -38,17 +38,6 @@ wchar_t *texturePath(uint64_t hash, wchar_t (&path)[32]) {
   return path;
 }
 
-// A window of this thread whose class is SDL's: OpenRemix's stand-in for a
-// window in another process (platform/window.cpp).
-BOOL CALLBACK findSdlWindow(HWND window, LPARAM found) {
-  wchar_t name[64];
-  if (GetClassNameW(window, name, 64) && std::wcsstr(name, L"SDL")) {
-    *reinterpret_cast<HWND *>(found) = window;
-    return FALSE;
-  }
-  return TRUE;
-}
-
 } // namespace
 
 struct DirectRenderer::State {
@@ -69,7 +58,6 @@ struct DirectRenderer::State {
   std::unordered_map<uint64_t, remixapi_MaterialHandle> materials;
   std::unordered_map<uint64_t, remixapi_MeshHandle> meshes;
   std::unordered_map<uint64_t, remixapi_LightHandle> lights;
-  HWND standIn = nullptr;
 
   // Logs a failed call the first frames only (they repeat every frame).
   void check(const char *call, remixapi_ErrorCode error) const {
@@ -197,7 +185,6 @@ bool DirectRenderer::start(HWND window, const Config &config, const std::filesys
       log("USD mods %s: %d", directory.c_str(), int(configure(&options)));
     }
   }
-  EnumThreadWindows(GetCurrentThreadId(), findSdlWindow, reinterpret_cast<LPARAM>(&m->standIn));
   m->active = true;
   log("OpenRemix started on window %p", static_cast<void *>(window));
   return true;
@@ -484,15 +471,11 @@ RendererStatus DirectRenderer::status() {
     s.guiWantsKeyboard = window.guiWantsKeyboard;
     s.guiWantsMouse = window.guiWantsMouse;
   }
+  s.menuOpen = m->api.GetUIState && m->api.GetUIState() != REMIXAPI_UI_STATE_NONE;
   return s;
 }
 
 bool DirectRenderer::alive() { return m->active; }
-
-void DirectRenderer::input(UINT message, WPARAM w, LPARAM l) {
-  if (m->active && m->standIn)
-    SendMessageW(m->standIn, message, w, l);
-}
 
 #if defined(_WIN64) && !defined(OPENREMIX_D3D9_HOST)
 Renderer &renderer() {
