@@ -34,10 +34,6 @@ public:
   RendererStatus status() override;
   bool alive() override;
 
-  // Forwarded window input (OpenRemixHost.exe): delivered to OpenRemix's
-  // window as if it had received it.
-  void input(UINT message, WPARAM w, LPARAM l);
-
 private:
   struct State;
   std::unique_ptr<State> m;

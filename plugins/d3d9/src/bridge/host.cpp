@@ -4,9 +4,11 @@
 // game's window (OpenRemix's window in another process, platform/window.cpp).
 // It exits with the game.
 #include "bridge/channel.h"
+#include "bridge/host_input.h"
 #include "config.h"
 #include "direct_renderer.h"
 #include "log.h"
+#include "perf.h"
 
 #include <cstring>
 #include <string>
@@ -63,6 +65,29 @@ void publish(Channel &channel, DirectRenderer &renderer) {
   std::memcpy(const_cast<RendererStatus *>(&channel.state().status), &status, sizeof(status));
 }
 
+// Every few seconds: the host's frame rate and its time by command.
+struct HostPerformance {
+  int64_t since = perf::now(), waiting = 0;
+  int64_t time[kInput + 1] = {};
+  uint32_t count[kInput + 1] = {};
+  uint32_t frames = 0;
+
+  void report() {
+    const int64_t now = perf::now();
+    const double elapsed = perf::milliseconds(now - since);
+    if (elapsed < 2000 || !frames)
+      return;
+    auto per = [&](Command c) { return perf::milliseconds(time[c]) / frames; };
+    log("performance: %.1f fps; per frame: waiting for the game %.2f ms, present %.2f ms, meshes %.1f (%.2f ms), "
+        "mesh destroys %.1f (%.2f ms), textures %.1f (%.2f ms), instances %.0f (%.2f ms), UI %.2f ms, input %.1f",
+        frames * 1000 / elapsed, perf::milliseconds(waiting) / frames, per(kPresent),
+        double(count[kCreateMesh]) / frames, per(kCreateMesh), double(count[kDestroyMesh]) / frames,
+        per(kDestroyMesh), double(count[kStoreTexture]) / frames, per(kStoreTexture),
+        double(count[kDrawInstance]) / frames, per(kDrawInstance), per(kSubmitUi), double(count[kInput]) / frames);
+    *this = {};
+  }
+};
+
 void fail(Channel &channel, const char *reason) {
   log("OpenRemixHost: %s", reason);
   RendererStatus &status = const_cast<RendererStatus &>(channel.state().status);
@@ -93,10 +118,12 @@ int wmain(int argc, wchar_t **argv) {
   const std::filesystem::path pluginDirectory = std::filesystem::path(self).parent_path().parent_path();
 
   DirectRenderer renderer;
+  HostInput input;
   PacketHeader header;
   std::vector<uint8_t> payload;
   std::vector<remixapi_Transform> bones;
   bool running = true;
+  HostPerformance performance;
   while (running) {
     // Messages for this thread's windows (OpenRemix's stand-in window).
     MSG message;
@@ -104,14 +131,19 @@ int wmain(int argc, wchar_t **argv) {
       TranslateMessage(&message);
       DispatchMessageW(&message);
     }
+    const int64_t waitStart = perf::now();
     const Channel::Received received = channel.receive(header, payload, 50);
+    performance.waiting += perf::now() - waitStart;
     if (received == Channel::Received::Timeout)
       continue;
     if (received == Channel::Received::Broken) {
+      // The game is gone: nothing to shut down in order (OpenRemix's
+      // shutdown can wait on a window that no longer exists).
       log("OpenRemixHost: %s", channel.error().c_str());
-      break;
+      TerminateProcess(GetCurrentProcess(), 0);
     }
     Reader in(payload);
+    const int64_t commandStart = perf::now();
     switch (header.command) {
     case kStart: {
       const StartPacket start = in.take<StartPacket>();
@@ -208,17 +240,36 @@ int wmain(int argc, wchar_t **argv) {
       renderer.setFullscreen(in.take<uint32_t>() != 0);
       break;
     case kInput: {
-      const InputPacket input = in.take<InputPacket>();
-      renderer.input(input.message, WPARAM(input.w), LPARAM(int64_t(input.l)));
+      const InputPacket packet = in.take<InputPacket>();
+      if (renderer.alive())
+        input.deliver(packet.message, WPARAM(packet.w), LPARAM(int64_t(packet.l)));
       break;
     }
     default:
       log("OpenRemixHost: unknown command %u", unsigned(header.command));
       break;
     }
+    if (header.command <= kInput) {
+      performance.time[header.command] += perf::now() - commandStart;
+      ++performance.count[header.command];
+    }
+    if (header.command == kPresent) {
+      ++performance.frames;
+      performance.report();
+    }
     if (!in.ok())
       log("OpenRemixHost: command %u had a short payload (%u bytes)", unsigned(header.command), header.size);
   }
+  // A shutdown that hangs does not keep the host alive.
+  CreateThread(
+      nullptr, 0,
+      [](void *) -> DWORD {
+        Sleep(10000);
+        log("OpenRemixHost: shutdown did not finish in 10 s");
+        TerminateProcess(GetCurrentProcess(), 1);
+        return 0;
+      },
+      nullptr, 0, nullptr);
   renderer.shutdown();
   if (channel.state().hostState.load() != kHostFailed)
     channel.state().hostState.store(kHostStopped, std::memory_order_release);

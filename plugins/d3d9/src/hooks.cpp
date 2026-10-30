@@ -6,14 +6,18 @@
 #include "classify.h"
 #include "formats.h"
 #include "hash.h"
+#include "input_hooks.h"
 #include "log.h"
+#include "perf.h"
 #include "renderer.h"
 #include "translator.h"
+#include "vertex_capture.h"
 #include "vertex.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -33,6 +37,7 @@ enum : unsigned {
   kCreateDevice = 16,
   kCreateDeviceEx = 20,
   // IDirect3DDevice9 / IDirect3DDevice9Ex
+  kGetCreationParameters = 9,
   kCreateAdditionalSwapChain = 13,
   kGetSwapChain = 14,
   kReset = 16,
@@ -43,11 +48,14 @@ enum : unsigned {
   kUpdateSurface = 30,
   kUpdateTexture = 31,
   kSetLight = 51,
+  kSetSoftwareVertexProcessing = 77,
+  kGetSoftwareVertexProcessing = 78,
   kDrawPrimitive = 81,
   kDrawIndexedPrimitive = 82,
   kDrawPrimitiveUP = 83,
   kDrawIndexedPrimitiveUP = 84,
   kCreateVertexDeclaration = 86,
+  kCreateVertexShader = 91,
   kCreateQuery = 118,
   kPresentEx = 121,
   kResetEx = 132,
@@ -107,6 +115,12 @@ IDirect3DSurface9 *g_backBuffer = nullptr; // identity only
 bool g_started = false, g_startFailed = false;
 std::atomic<int> g_openQueries{0};
 uint32_t g_drawId = 0; // draws this frame
+// Set on a thread while the plugin makes its own D3D9 calls (InternalCalls).
+thread_local bool t_internal = false;
+
+// Vertex shaders' bytecode (vertex capture).
+std::mutex g_shaderLock;
+std::unordered_map<const void *, std::shared_ptr<const ShaderCode>> g_shaders;
 
 std::mutex g_lightLock;
 std::unordered_map<DWORD, D3DLIGHT9> g_lights;
@@ -145,7 +159,7 @@ using UnlockFn = HRESULT(STDMETHODCALLTYPE *)(void *);
 ULONG STDMETHODCALLTYPE bufferRelease(IUnknown *self) {
   ReleaseFn fn = original<ReleaseFn>(self, kRelease);
   const ULONG references = fn ? fn(self) : 0;
-  if (references == 0) {
+  if (references == 0 && !t_internal) {
     std::lock_guard<std::mutex> lock(g_shadowLock);
     g_shadows.erase(self);
   }
@@ -155,7 +169,9 @@ ULONG STDMETHODCALLTYPE bufferRelease(IUnknown *self) {
 HRESULT STDMETHODCALLTYPE bufferLock(void *self, UINT offset, UINT size, void **data, DWORD flags) {
   LockFn fn = original<LockFn>(self, kBufferLock);
   const HRESULT hr = fn ? fn(self, offset, size, data, flags) : D3DERR_INVALIDCALL;
-  if (FAILED(hr) || !data || !*data)
+  // The plugin's own buffers (vertex capture) have no shadow; the capture
+  // runs while the shadows are locked.
+  if (FAILED(hr) || !data || !*data || t_internal)
     return hr;
   std::lock_guard<std::mutex> lock(g_shadowLock);
   auto it = g_shadows.find(self);
@@ -172,7 +188,7 @@ HRESULT STDMETHODCALLTYPE bufferLock(void *self, UINT offset, UINT size, void **
 }
 
 HRESULT STDMETHODCALLTYPE bufferUnlock(void *self) {
-  {
+  if (!t_internal) {
     std::lock_guard<std::mutex> lock(g_shadowLock);
     auto it = g_shadows.find(self);
     if (it != g_shadows.end()) {
@@ -305,6 +321,7 @@ uint64_t textureHashOf(IDirect3DBaseTexture9 *texture) {
   }
   if (texture->GetType() != D3DRTYPE_TEXTURE)
     return 0;
+  perf::Timer timer(perf::g_counters.textureRead);
   const uint64_t hash =
       readLevelZero(static_cast<IDirect3DTexture9 *>(texture), g_env.config.useObsoleteHashOnTextureUpload);
   std::lock_guard<std::mutex> lock(g_textureLock);
@@ -398,6 +415,11 @@ bool presenting() { return ensureStarted() && translator::active(); }
 void endFrame() {
   translator::present(g_backBufferWidth, g_backBufferHeight);
   g_drawId = 0;
+  input::setMenuOpen(renderer().status().menuOpen != 0);
+  // Modules the game loaded since (rarely any after its first frames).
+  static uint32_t frames = 0;
+  if (++frames % 600 == 0)
+    input::hook();
 }
 
 using PresentFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, const RECT *, const RECT *, HWND, const RGNDATA *);
@@ -455,11 +477,44 @@ Declaration makeDeclaration(std::vector<D3DVERTEXELEMENT9> elements) {
 
 // The device state a draw needs, read through the Get* calls (state blocks
 // change it without passing the setters).
-bool gatherState(IDirect3DDevice9 *dev, Draw &d, Declaration &declaration, std::vector<Light> &lights) {
+// A shader draw's constants (vertex capture), alive while the draw is captured.
+struct ShaderState {
+  std::shared_ptr<const ShaderCode> code;
+  float f[256 * 4];
+  int i[16 * 4];
+  BOOL b[16];
+};
+
+bool gatherState(IDirect3DDevice9 *dev, Draw &d, Declaration &declaration, std::vector<Light> &lights,
+                 ShaderState &shaderState) {
   IDirect3DVertexShader9 *shader = nullptr;
   if (SUCCEEDED(dev->GetVertexShader(&shader)) && shader) {
     d.vertexShader = true;
+    if (g_env.config.useVertexCapture) {
+      {
+        std::lock_guard<std::mutex> lock(g_shaderLock);
+        if (auto it = g_shaders.find(shader); it != g_shaders.end())
+          shaderState.code = it->second;
+      }
+      if (shaderState.code) {
+        dev->GetVertexShaderConstantF(0, shaderState.f, 256);
+        dev->GetVertexShaderConstantI(0, shaderState.i, 16);
+        dev->GetVertexShaderConstantB(0, shaderState.b, 16);
+        d.shader = shaderState.code.get();
+        d.constantsF = shaderState.f;
+        d.constantsI = shaderState.i;
+        d.constantsB = shaderState.b;
+        uint64_t hash = XXH3_64bits(shaderState.f, sizeof(shaderState.f));
+        hash = XXH3_64bits_withSeed(shaderState.i, sizeof(shaderState.i), hash);
+        d.constantsHash = XXH3_64bits_withSeed(shaderState.b, sizeof(shaderState.b), hash);
+      }
+    }
     shader->Release();
+  }
+  IDirect3DPixelShader9 *pixel = nullptr;
+  if (SUCCEEDED(dev->GetPixelShader(&pixel)) && pixel) {
+    d.pixelShader = true;
+    pixel->Release();
   }
   DWORD fvf = 0;
   dev->GetFVF(&fvf);
@@ -597,9 +652,12 @@ void gatherBuffers(IDirect3DDevice9 *dev, Draw &d) {
 template <class Fill> bool capture(IDirect3DDevice9 *dev, Draw &d, Fill fillGeometry) {
   if (!g_started || !translator::active())
     return true;
+  perf::Timer timer(perf::g_counters.capture);
+  ++perf::g_counters.draws;
   Declaration declaration;
   std::vector<Light> lights;
-  if (!gatherState(dev, d, declaration, lights))
+  ShaderState shaderState;
+  if (!gatherState(dev, d, declaration, lights, shaderState))
     return true;
   std::lock_guard<std::mutex> lock(g_shadowLock);
   fillGeometry(d);
@@ -714,7 +772,7 @@ HRESULT STDMETHODCALLTYPE createTexture(IDirect3DDevice9 *dev, UINT width, UINT 
                                         D3DFORMAT format, D3DPOOL pool, IDirect3DTexture9 **out, HANDLE *shared) {
   auto fn = original<CreateTextureFn>(dev, kCreateTexture);
   const HRESULT hr = fn ? fn(dev, width, height, levels, usage, format, pool, out, shared) : D3DERR_INVALIDCALL;
-  if (SUCCEEDED(hr) && out && *out) {
+  if (SUCCEEDED(hr) && out && *out && !t_internal) {
     {
       std::lock_guard<std::mutex> lock(g_textureLock);
       g_textures.erase(*out); // an earlier texture at this address
@@ -724,11 +782,23 @@ HRESULT STDMETHODCALLTYPE createTexture(IDirect3DDevice9 *dev, UINT width, UINT 
   return hr;
 }
 
+// The game's buffers on the real device, which processes vertices in
+// hardware whatever the game asked for (behaviorFlags): software processing
+// buffers are refused there.
+DWORD bufferUsage(DWORD usage) { return t_internal ? usage : usage & ~DWORD(D3DUSAGE_SOFTWAREPROCESSING); }
+
+void logBufferFailure(const char *kind, UINT length, DWORD usage, D3DPOOL pool, HRESULT hr) {
+  static std::atomic<int> logged{0};
+  if (FAILED(hr) && !t_internal && logged++ < 5)
+    log("Create%sBuffer(%u bytes, usage 0x%lx, pool %d) failed: 0x%08lX", kind, length, usage, int(pool), hr);
+}
+
 HRESULT STDMETHODCALLTYPE createVertexBuffer(IDirect3DDevice9 *dev, UINT length, DWORD usage, DWORD fvf, D3DPOOL pool,
                                              IDirect3DVertexBuffer9 **out, HANDLE *shared) {
   auto fn = original<CreateVertexBufferFn>(dev, kCreateVertexBuffer);
-  const HRESULT hr = fn ? fn(dev, length, usage, fvf, pool, out, shared) : D3DERR_INVALIDCALL;
-  if (SUCCEEDED(hr) && out && *out)
+  const HRESULT hr = fn ? fn(dev, length, bufferUsage(usage), fvf, pool, out, shared) : D3DERR_INVALIDCALL;
+  logBufferFailure("Vertex", length, usage, pool, hr);
+  if (SUCCEEDED(hr) && out && *out && !t_internal)
     trackBuffer(*out, length, false);
   return hr;
 }
@@ -736,8 +806,9 @@ HRESULT STDMETHODCALLTYPE createVertexBuffer(IDirect3DDevice9 *dev, UINT length,
 HRESULT STDMETHODCALLTYPE createIndexBuffer(IDirect3DDevice9 *dev, UINT length, DWORD usage, D3DFORMAT format,
                                             D3DPOOL pool, IDirect3DIndexBuffer9 **out, HANDLE *shared) {
   auto fn = original<CreateIndexBufferFn>(dev, kCreateIndexBuffer);
-  const HRESULT hr = fn ? fn(dev, length, usage, format, pool, out, shared) : D3DERR_INVALIDCALL;
-  if (SUCCEEDED(hr) && out && *out)
+  const HRESULT hr = fn ? fn(dev, length, bufferUsage(usage), format, pool, out, shared) : D3DERR_INVALIDCALL;
+  logBufferFailure("Index", length, usage, pool, hr);
+  if (SUCCEEDED(hr) && out && *out && !t_internal)
     trackBuffer(*out, length, format == D3DFMT_INDEX32);
   return hr;
 }
@@ -799,6 +870,21 @@ HRESULT STDMETHODCALLTYPE createVertexDeclaration(IDirect3DDevice9 *dev, const D
   if (SUCCEEDED(hr) && out && *out) {
     std::lock_guard<std::mutex> lock(g_declLock);
     g_declarations.erase(*out); // an earlier declaration at this address
+  }
+  return hr;
+}
+
+using CreateVertexShaderFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, const DWORD *,
+                                                          IDirect3DVertexShader9 **);
+
+// Keeps a vertex shader's bytecode for vertex capture.
+HRESULT STDMETHODCALLTYPE createVertexShader(IDirect3DDevice9 *dev, const DWORD *code, IDirect3DVertexShader9 **out) {
+  auto fn = original<CreateVertexShaderFn>(dev, kCreateVertexShader);
+  const HRESULT hr = fn ? fn(dev, code, out) : D3DERR_INVALIDCALL;
+  if (SUCCEEDED(hr) && out && *out && !t_internal && g_env.config.useVertexCapture) {
+    auto shader = std::make_shared<const ShaderCode>(parseShader(code));
+    std::lock_guard<std::mutex> lock(g_shaderLock);
+    g_shaders[*out] = std::move(shader); // also replaces an earlier shader at this address
   }
   return hr;
 }
@@ -879,7 +965,7 @@ HRESULT STDMETHODCALLTYPE resetEx(IDirect3DDevice9Ex *dev, D3DPRESENT_PARAMETERS
 ULONG STDMETHODCALLTYPE deviceRelease(IUnknown *self) {
   ReleaseFn fn = original<ReleaseFn>(self, kRelease);
   const ULONG references = fn ? fn(self) : 0;
-  if (references == 0 && g_started) {
+  if (references == 0 && g_started && !t_internal) {
     translator::shutdown();
     g_started = false;
     g_startFailed = false;
@@ -888,9 +974,40 @@ ULONG STDMETHODCALLTYPE deviceRelease(IUnknown *self) {
   return references;
 }
 
+// The game asked for software (or mixed) vertex processing: the real device
+// processes vertices in hardware all the same. Windows' software vertex
+// processing runs vertex shaders on the CPU and slows a game drawn for RTX
+// Remix (whose runtime ignores the request) to a crawl. The game is told
+// what it asked for.
+DWORD g_gameBehavior = 0;
+bool g_softwareVertexProcessing = false;
+
+HRESULT STDMETHODCALLTYPE getCreationParameters(IDirect3DDevice9 *dev, D3DDEVICE_CREATION_PARAMETERS *out) {
+  using Fn = HRESULT(STDMETHODCALLTYPE *)(IDirect3DDevice9 *, D3DDEVICE_CREATION_PARAMETERS *);
+  auto fn = original<Fn>(dev, kGetCreationParameters);
+  const HRESULT hr = fn ? fn(dev, out) : D3DERR_INVALIDCALL;
+  if (SUCCEEDED(hr) && out && !t_internal) {
+    out->BehaviorFlags = g_gameBehavior;
+    out->hFocusWindow = g_gameWindow;
+  }
+  return hr;
+}
+
+HRESULT STDMETHODCALLTYPE setSoftwareVertexProcessing(IDirect3DDevice9 *, BOOL software) {
+  g_softwareVertexProcessing = software != FALSE;
+  return D3D_OK;
+}
+
+BOOL STDMETHODCALLTYPE getSoftwareVertexProcessing(IDirect3DDevice9 *) {
+  return g_softwareVertexProcessing || (g_gameBehavior & D3DCREATE_SOFTWARE_VERTEXPROCESSING);
+}
+
 void hookDevice(IDirect3DDevice9 *dev) {
   auto at = [&](unsigned slot, auto function) { hook(dev, slot, reinterpret_cast<void *>(function)); };
   at(kRelease, &deviceRelease);
+  at(kGetCreationParameters, &getCreationParameters);
+  at(kSetSoftwareVertexProcessing, &setSoftwareVertexProcessing);
+  at(kGetSoftwareVertexProcessing, &getSoftwareVertexProcessing);
   at(kCreateAdditionalSwapChain, &createAdditionalSwapChain);
   at(kGetSwapChain, &getSwapChain);
   at(kReset, &reset);
@@ -907,6 +1024,7 @@ void hookDevice(IDirect3DDevice9 *dev) {
   at(kDrawIndexedPrimitiveUP, &drawIndexedPrimitiveUP);
   at(kCreateVertexDeclaration, &createVertexDeclaration);
   at(kCreateQuery, &createQuery);
+  at(kCreateVertexShader, &createVertexShader);
   IDirect3DDevice9Ex *ex = nullptr;
   if (SUCCEEDED(dev->QueryInterface(IID_IDirect3DDevice9Ex, reinterpret_cast<void **>(&ex))) && ex) {
     at(kPresentEx, &presentEx);
@@ -914,6 +1032,7 @@ void hookDevice(IDirect3DDevice9 *dev) {
     ex->Release();
   }
   refreshBackBuffer(dev);
+  input::hook();
 }
 
 using CreateDeviceFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3D9 *, UINT, D3DDEVTYPE, HWND, DWORD,
@@ -922,19 +1041,29 @@ using CreateDeviceExFn = HRESULT(STDMETHODCALLTYPE *)(IDirect3D9Ex *, UINT, D3DD
                                                       D3DPRESENT_PARAMETERS *, D3DDISPLAYMODEEX *,
                                                       IDirect3DDevice9Ex **);
 
-// Pure devices refuse the Get* calls the capture reads state with.
-DWORD behaviorFlags(DWORD flags) { return flags & ~DWORD(D3DCREATE_PUREDEVICE); }
+// Pure devices refuse the Get* calls the capture reads state with; vertices
+// are processed in hardware (g_gameBehavior).
+DWORD behaviorFlags(DWORD flags) {
+  g_gameBehavior = flags;
+  flags &= ~DWORD(D3DCREATE_PUREDEVICE);
+  if (flags & (D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING))
+    flags = (flags & ~DWORD(D3DCREATE_SOFTWARE_VERTEXPROCESSING | D3DCREATE_MIXED_VERTEXPROCESSING)) |
+            D3DCREATE_HARDWARE_VERTEXPROCESSING;
+  return flags;
+}
 
 HRESULT STDMETHODCALLTYPE createDevice(IDirect3D9 *self, UINT adapter, D3DDEVTYPE type, HWND focus, DWORD flags,
                                        D3DPRESENT_PARAMETERS *pp, IDirect3DDevice9 **out) {
   auto fn = original<CreateDeviceFn>(self, kCreateDevice);
   if (!fn || !pp)
     return D3DERR_INVALIDCALL;
+  if (t_internal)
+    return fn(self, adapter, type, focus, flags, pp, out);
   D3DPRESENT_PARAMETERS device = deviceParameters(focus, *pp);
   const HRESULT hr = fn(self, adapter, type, hiddenWindow(), behaviorFlags(flags), &device, out);
   returnParameters(device, *pp);
-  log("CreateDevice(window %p, %ux%u%s): 0x%08lX", static_cast<void *>(g_gameWindow), g_backBufferWidth,
-      g_backBufferHeight, g_fullscreen ? ", fullscreen" : "", hr);
+  log("CreateDevice(window %p, %ux%u%s, behavior 0x%lx): 0x%08lX", static_cast<void *>(g_gameWindow),
+      g_backBufferWidth, g_backBufferHeight, g_fullscreen ? ", fullscreen" : "", flags, hr);
   if (SUCCEEDED(hr) && out && *out)
     hookDevice(*out);
   return hr;
@@ -948,14 +1077,17 @@ HRESULT STDMETHODCALLTYPE createDeviceEx(IDirect3D9Ex *self, UINT adapter, D3DDE
   D3DPRESENT_PARAMETERS device = deviceParameters(focus, *pp);
   const HRESULT hr = fn(self, adapter, type, hiddenWindow(), behaviorFlags(flags), &device, nullptr, out);
   returnParameters(device, *pp);
-  log("CreateDeviceEx(window %p, %ux%u%s): 0x%08lX", static_cast<void *>(g_gameWindow), g_backBufferWidth,
-      g_backBufferHeight, g_fullscreen ? ", fullscreen" : "", hr);
+  log("CreateDeviceEx(window %p, %ux%u%s, behavior 0x%lx): 0x%08lX", static_cast<void *>(g_gameWindow),
+      g_backBufferWidth, g_backBufferHeight, g_fullscreen ? ", fullscreen" : "", flags, hr);
   if (SUCCEEDED(hr) && out && *out)
     hookDevice(*out);
   return hr;
 }
 
 } // namespace
+
+InternalCalls::InternalCalls() : m_previous(t_internal) { t_internal = true; }
+InternalCalls::~InternalCalls() { t_internal = m_previous; }
 
 void initialize(const Environment &environment) {
   g_env = environment;

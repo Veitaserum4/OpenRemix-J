@@ -26,7 +26,7 @@ endif
 # Engine-independent parts, shared with the tests and the host.
 core = static_library('openremix-d3d9-core',
   'src/camera.cpp', 'src/classify.cpp', 'src/config.cpp', 'src/formats.cpp', 'src/hash.cpp', 'src/log.cpp',
-  'src/profiles.cpp', 'src/vertex.cpp',
+  'src/profiles.cpp', 'src/vertex.cpp', 'src/vertex_capture.cpp',
   'src/bridge/channel.cpp',
   include_directories: includes,
 )
@@ -34,7 +34,7 @@ core = static_library('openremix-d3d9-core',
 # The plugin: OpenRemix in process on x64; on x86, the bridge to
 # OpenRemixHost.exe (OpenRemix is 64-bit).
 shared_library('d3d9',
-  'src/hooks.cpp', 'src/main.cpp', 'src/translator.cpp',
+  'src/hooks.cpp', 'src/input_hooks.cpp', 'src/main.cpp', 'src/translator.cpp',
   x64 ? 'src/direct_renderer.cpp' : 'src/bridge/client.cpp',
   include_directories: includes,
   link_with: core,
@@ -44,8 +44,11 @@ shared_library('d3d9',
 )
 
 if x64
-  executable('OpenRemixHost', 'src/bridge/host.cpp', 'src/direct_renderer.cpp',
-    include_directories: includes,
+  # SDL's headers: the host hands OpenRemix's window the game's input as SDL
+  # events (SDL3.dll is the runtime's).
+  sdl_includes = include_directories(repository / 'subprojects' / 'SDL3-3.4.14' / 'include')
+  executable('OpenRemixHost', 'src/bridge/host.cpp', 'src/bridge/host_input.cpp', 'src/direct_renderer.cpp',
+    include_directories: [includes, sdl_includes],
     link_with: core,
     cpp_args: ['-DOPENREMIX_D3D9_HOST'],
     link_args: ['user32.lib', '/ENTRY:wmainCRTStartup'],
@@ -53,9 +56,12 @@ if x64
   )
 endif
 
+# The tests load the system's d3d9.dll by its path: the plugin built next to
+# them would be found first.
 tests = executable('openremix-d3d9-tests', 'tests/tests.cpp',
   include_directories: includes,
   link_with: core,
+  link_args: ['user32.lib'],
 )
 test('d3d9-plugin', tests)
 
