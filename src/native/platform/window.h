@@ -133,6 +133,12 @@ namespace remix {
     static bool SDLCALL eventFilter(void *userdata, SDL_Event *event);
 
     SDL_Window *m_window = nullptr;
+    // A host window owned by another process (an HWND; the RTX Remix bridge's
+    // 32-bit game). SDL cannot adopt it: adopting sends it messages, and its
+    // thread waits on this one to present. m_window is then a hidden window of
+    // this process (ImGui and SDL's state), resized to the host's, and the
+    // surface and window state come from the host window directly.
+    void *m_foreignWindow = nullptr;
     std::thread::id m_ownerThread;
     bool m_ownsVideoSubsystem = false;
     bool m_embedded = false;

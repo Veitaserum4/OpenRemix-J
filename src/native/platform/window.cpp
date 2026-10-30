@@ -26,8 +26,33 @@
 #if defined(__APPLE__)
 #include <pthread.h>
 #endif
+#if defined(_WIN32)
+#include <windows.h>
+#if !REMIX_METAL
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
+#endif
+#endif
 
 namespace remix {
+
+#if defined(_WIN32)
+  namespace {
+    // Whether a window belongs to another process.
+    bool foreign(HWND window) {
+      DWORD process = 0;
+      return GetWindowThreadProcessId(window, &process) && process != GetCurrentProcessId();
+    }
+
+    // A foreign window's client size (no message reaches its thread).
+    void clientSize(void *window, int &width, int &height) {
+      RECT client = {};
+      GetClientRect(static_cast<HWND>(window), &client);
+      width = std::max<int>(client.right - client.left, 0);
+      height = std::max<int>(client.bottom - client.top, 0);
+    }
+  } // namespace
+#endif
 
   RemixSdlWindow::~RemixSdlWindow() { shutdown(); }
 
@@ -50,8 +75,10 @@ namespace remix {
     // the events its window procedure already queued.
     if (info.hwnd) {
       m_embedded = true;
+      if (foreign(static_cast<HWND>(info.hwnd)))
+        m_foreignWindow = info.hwnd;
       int count = 0;
-      if (SDL_Window **windows = SDL_GetWindows(&count)) {
+      if (SDL_Window **windows = m_foreignWindow ? nullptr : SDL_GetWindows(&count)) {
         for (int i = 0; i < count; ++i) {
           HWND existing = static_cast<HWND>(
               SDL_GetPointerProperty(SDL_GetWindowProperties(windows[i]), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
@@ -76,7 +103,12 @@ namespace remix {
     }
 
 #if defined(_WIN32)
-    if (info.hwnd) {
+    if (m_foreignWindow) {
+      int width, height;
+      clientSize(m_foreignWindow, width, height);
+      m_window = SDL_CreateWindow("OpenRemix", std::max(width, 1), std::max(height, 1),
+                                  SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN);
+    } else if (info.hwnd) {
       if (!m_window) {
         SDL_PropertiesID props = SDL_CreateProperties();
         if (props) {
@@ -147,6 +179,7 @@ namespace remix {
     m_ownerThread = std::thread::id{};
     m_embedded = false;
     m_adoptedWindow = false;
+    m_foreignWindow = nullptr;
     m_eventHandler = nullptr;
     m_eventUserData = nullptr;
     m_surfaceWindow = nullptr;
@@ -171,6 +204,27 @@ namespace remix {
 
     int width = 0;
     int height = 0;
+#if defined(_WIN32)
+    if (m_foreignWindow) {
+      const HWND window = static_cast<HWND>(m_foreignWindow);
+      clientSize(window, width, height);
+      // ImGui takes its display size from the stand-in.
+      int ownWidth = 0, ownHeight = 0;
+      SDL_GetWindowSize(m_window, &ownWidth, &ownHeight);
+      if (width > 0 && height > 0 && (width != ownWidth || height != ownHeight))
+        SDL_SetWindowSize(m_window, width, height);
+      state.focused = GetForegroundWindow() == window;
+      state.closeRequested = m_closeRequested || !IsWindow(window);
+      state.minimized = IsIconic(window) != 0;
+      state.fullscreen = false;
+      state.guiWantsKeyboard = m_guiWantsKeyboard;
+      state.guiWantsMouse = m_guiWantsMouse;
+      const bool drawable = IsWindowVisible(window) && !state.minimized;
+      state.drawableWidth = drawable ? static_cast<uint32_t>(width) : 0;
+      state.drawableHeight = drawable ? static_cast<uint32_t>(height) : 0;
+      return REMIXAPI_ERROR_CODE_SUCCESS;
+    }
+#endif
     if (!SDL_GetWindowSizeInPixels(m_window, &width, &height)) {
       setSdlError("SDL_GetWindowSizeInPixels");
       return REMIXAPI_ERROR_CODE_GENERAL_FAILURE;
@@ -195,6 +249,9 @@ namespace remix {
     if (threadStatus != REMIXAPI_ERROR_CODE_SUCCESS) {
       return threadStatus;
     }
+    // Another process's window is its own to resize.
+    if (m_foreignWindow)
+      return REMIXAPI_ERROR_CODE_FEATURE_UNAVAILABLE;
 
     if (!SDL_SetWindowFullscreen(m_window, fullscreen)) {
       setSdlError("SDL_SetWindowFullscreen");
@@ -257,6 +314,24 @@ namespace remix {
       return threadStatus;
     }
 
+#if defined(_WIN32)
+    if (m_foreignWindow) {
+      // Vulkan presents into another process's window without messaging it.
+      const auto getProcAddress = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
+      const auto create = getProcAddress ? reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(
+                                               getProcAddress(instance, "vkCreateWin32SurfaceKHR"))
+                                         : nullptr;
+      VkWin32SurfaceCreateInfoKHR createInfo = {};
+      createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+      createInfo.hinstance = GetModuleHandleW(nullptr);
+      createInfo.hwnd = static_cast<HWND>(m_foreignWindow);
+      if (!create || create(instance, &createInfo, allocator, &surface) != VK_SUCCESS) {
+        m_lastError = "vkCreateWin32SurfaceKHR failed for the host window";
+        return REMIXAPI_ERROR_CODE_GENERAL_FAILURE;
+      }
+      return REMIXAPI_ERROR_CODE_SUCCESS;
+    }
+#endif
     if (!SDL_Vulkan_CreateSurface(m_window, instance, allocator, &surface)) {
       setSdlError("SDL_Vulkan_CreateSurface");
       return REMIXAPI_ERROR_CODE_GENERAL_FAILURE;
@@ -276,6 +351,14 @@ namespace remix {
     if (status != REMIXAPI_ERROR_CODE_SUCCESS)
       return status;
     int width, height, pixelsX, pixelsY;
+#if defined(_WIN32)
+    if (m_foreignWindow) {
+      clientSize(m_foreignWindow, width, height);
+      metrics = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(width),
+                 static_cast<uint32_t>(height)};
+      return REMIXAPI_ERROR_CODE_SUCCESS;
+    }
+#endif
     if (!SDL_GetWindowSize(m_window, &width, &height) ||
         !SDL_GetWindowSizeInPixels(m_window, &pixelsX, &pixelsY)) {
       return REMIXAPI_ERROR_CODE_GENERAL_FAILURE;
