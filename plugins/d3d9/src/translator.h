@@ -21,6 +21,9 @@ void shutdown();
 // packLevel). Any thread, also before start.
 void textureFilled(uint64_t hash, D3DFORMAT format, uint32_t width, uint32_t height,
                    const std::vector<uint8_t> &packed);
+// What `key` shows of a texture the game wrote after hashing it.
+void textureRewritten(uint64_t key, D3DFORMAT format, uint32_t width, uint32_t height,
+                      const std::vector<uint8_t> &packed);
 
 // A classified draw. True when the translator took it (World or Ui) into the
 // frame; false leaves it to the real device.

@@ -140,6 +140,7 @@ std::mutex g_declLock;
 struct TextureState {
   uint64_t hash = 0;
   bool written = false; // level 0 was written since the hash was taken
+  uint64_t uiKey = 0;   // its contents for UI draws, once written after hashing
 };
 std::mutex g_textureLock;
 std::unordered_map<const void *, TextureState> g_textures;
@@ -235,27 +236,32 @@ thread_local bool t_reading = false;
 // Reads level 0 of a lockable texture back: its hash, and its contents for
 // OpenRemix. `obsolete`: the hash of a lock upload with
 // rtx.useObsoleteHashOnTextureUpload (XXH64). 0 if it cannot be read.
-uint64_t readLevelZero(IDirect3DTexture9 *texture, bool obsolete) {
-  D3DSURFACE_DESC desc;
+std::vector<uint8_t> packLevelZero(IDirect3DTexture9 *texture, D3DSURFACE_DESC &desc) {
   if (t_reading || FAILED(texture->GetLevelDesc(0, &desc)) ||
       (desc.Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)))
-    return 0;
+    return {};
   FormatLayout layout;
   if (!formatLayout(desc.Format, layout))
-    return 0;
+    return {};
   auto unlockRect = original<TextureUnlockRectFn>(texture, kTextureUnlockRect);
   if (!unlockRect)
-    return 0;
+    return {};
   t_reading = true;
   D3DLOCKED_RECT locked;
   if (FAILED(texture->LockRect(0, &locked, nullptr, D3DLOCK_READONLY))) {
     t_reading = false;
-    return 0;
+    return {};
   }
   std::vector<uint8_t> packed = packLevel(desc.Format, desc.Width, desc.Height,
                                           static_cast<const uint8_t *>(locked.pBits), uint32_t(locked.Pitch));
   unlockRect(texture, 0);
   t_reading = false;
+  return packed;
+}
+
+uint64_t readLevelZero(IDirect3DTexture9 *texture, bool obsolete) {
+  D3DSURFACE_DESC desc;
+  const std::vector<uint8_t> packed = packLevelZero(texture, desc);
   if (packed.empty())
     return 0;
   const uint64_t hash = textureHash(packed.data(), packed.size(), obsolete);
@@ -335,6 +341,35 @@ uint64_t textureHashOf(IDirect3DBaseTexture9 *texture) {
   if (hash)
     g_textures[texture].hash = hash;
   return g_textures[texture].hash;
+}
+
+// What a UI draw shows of a texture: its hash, until the game writes it again.
+// The hash stays (rules and replacements name it), but the real device would
+// show the new contents: Source adds glyphs to its font pages as text first
+// needs them. Those contents get a key of this texture's own, since textures
+// can share a hash.
+uint64_t uiTextureOf(IDirect3DBaseTexture9 *texture, uint64_t hash) {
+  static uint64_t nextKey = 0;
+  uint64_t key;
+  {
+    std::lock_guard<std::mutex> lock(g_textureLock);
+    auto it = g_textures.find(texture);
+    if (it == g_textures.end())
+      return hash;
+    TextureState &t = it->second;
+    if (!t.written || texture->GetType() != D3DRTYPE_TEXTURE)
+      return t.uiKey ? t.uiKey : hash;
+    t.written = false;
+    if (!t.uiKey)
+      t.uiKey = XXH3_64bits_withSeed(&hash, sizeof(hash), ++nextKey) | 1;
+    key = t.uiKey;
+  }
+  perf::Timer timer(perf::g_counters.textureRead);
+  D3DSURFACE_DESC desc;
+  const std::vector<uint8_t> packed = packLevelZero(static_cast<IDirect3DTexture9 *>(texture), desc);
+  if (!packed.empty())
+    translator::textureRewritten(key, desc.Format, desc.Width, desc.Height, packed);
+  return key;
 }
 
 // --- Window and presentation parameters ------------------------------------
@@ -603,6 +638,7 @@ bool gatherState(IDirect3DDevice9 *dev, Draw &d, Declaration &declaration, Shade
       stage.bound = true;
       stage.texture2D = texture->GetType() == D3DRTYPE_TEXTURE;
       stage.hash = textureHashOf(texture);
+      stage.texture = texture;
       texture->Release();
     }
     if (stage.states[D3DTSS_COLOROP] == D3DTOP_DISABLE)
@@ -679,6 +715,8 @@ template <class Fill> bool capture(IDirect3DDevice9 *dev, Draw &d, Fill fillGeom
   const char *reason = "material texture without hash";
   const DrawKind kind =
       selectTexture(d, g_env.config) ? classify(d, g_env.config, pretransformed, &reason) : DrawKind::Skip;
+  if (kind == DrawKind::Ui && d.texture0)
+    d.uiTexture = uiTextureOf(d.stages[d.textureStage].texture, d.texture0);
   const char *left = nullptr;
   const bool taken = translator::draw(d, kind, &left);
   if (translator::loggingDraws()) {
@@ -853,8 +891,10 @@ void copyHash(IDirect3DBaseTexture9 *source, const void *destination) {
   {
     std::lock_guard<std::mutex> lock(g_textureLock);
     auto it = g_textures.find(destination);
-    if (it != g_textures.end() && it->second.hash && !g_env.config.recomputeTextureHashOnWrite)
+    if (it != g_textures.end() && it->second.hash && !g_env.config.recomputeTextureHashOnWrite) {
+      it->second.written = true;
       return;
+    }
   }
   if (source->GetType() != D3DRTYPE_TEXTURE)
     return;
@@ -869,10 +909,12 @@ void copyHash(IDirect3DBaseTexture9 *source, const void *destination) {
 
 HRESULT STDMETHODCALLTYPE updateSurface(IDirect3DDevice9 *dev, IDirect3DSurface9 *source, const RECT *sourceRect,
                                         IDirect3DSurface9 *destination, const POINT *point) {
-  if (source && destination && !sourceRect && !point) {
+  if (source && destination) {
     IDirect3DTexture9 *from = levelZeroTexture(source), *to = levelZeroTexture(destination);
-    if (from && to)
+    if (from && to && !sourceRect && !point)
       copyHash(from, to);
+    else if (to)
+      textureWritten(to); // part of it, or from a surface of no texture
   }
   auto fn = original<UpdateSurfaceFn>(dev, kUpdateSurface);
   return fn ? fn(dev, source, sourceRect, destination, point) : D3DERR_INVALIDCALL;

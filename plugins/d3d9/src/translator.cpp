@@ -733,8 +733,8 @@ bool uiDraw(const Draw &d) {
   for (size_t i = 0; i < mesh.vertices.size(); ++i) {
     const auto &v = mesh.vertices[i];
     UiVertex out = {};
+    // D3D9 pixel centres are at integers, Vulkan's at half integers.
     if (mesh.pretransformed) {
-      // D3D9 pixel centres are at integers, Vulkan's at half integers.
       out.x = v.position[0] + 0.5f;
       out.y = v.position[1] + 0.5f;
       out.z = std::clamp(v.position[2], 0.0f, 1.0f);
@@ -744,8 +744,8 @@ bool uiDraw(const Draw &d) {
         clip[c] = v.position[0] * wvp.m[0][c] + v.position[1] * wvp.m[1][c] + v.position[2] * wvp.m[2][c] +
                   wvp.m[3][c];
       const float w = std::fabs(clip[3]) > 1e-6f ? clip[3] : 1e-6f;
-      out.x = vx + (clip[0] / w * 0.5f + 0.5f) * vw;
-      out.y = vy + (0.5f - clip[1] / w * 0.5f) * vh;
+      out.x = vx + (clip[0] / w * 0.5f + 0.5f) * vw + 0.5f;
+      out.y = vy + (0.5f - clip[1] / w * 0.5f) * vh + 0.5f;
       out.z = std::clamp(d.viewport.MinZ + clip[2] / w * (d.viewport.MaxZ - d.viewport.MinZ), 0.0f, 1.0f);
     }
     out.u = v.texcoord[0];
@@ -759,7 +759,7 @@ bool uiDraw(const Draw &d) {
     g_uiVertices.push_back(out);
   }
   UiCommand command = {};
-  command.texture = textured ? d.texture0 : 0;
+  command.texture = !textured ? 0 : d.uiTexture ? d.uiTexture : d.texture0;
   command.indexCount = uint32_t(mesh.indices.size());
   command.indexOffset = uint32_t(g_uiIndices.size());
   for (uint32_t index : mesh.indices)
@@ -837,6 +837,13 @@ void textureFilled(uint64_t hash, D3DFORMAT format, uint32_t width, uint32_t hei
   ++perf::g_counters.textures;
   perf::g_counters.textureBytes += packed.size();
   renderer().storeTexture(hash, uint32_t(format), width, height, packed.data(), packed.size());
+}
+
+void textureRewritten(uint64_t key, D3DFORMAT format, uint32_t width, uint32_t height,
+                      const std::vector<uint8_t> &packed) {
+  ++perf::g_counters.textures;
+  perf::g_counters.textureBytes += packed.size();
+  renderer().replaceTexture(key, uint32_t(format), width, height, packed.data(), packed.size());
 }
 
 void lights(const std::vector<D3DLIGHT9> &enabled) {

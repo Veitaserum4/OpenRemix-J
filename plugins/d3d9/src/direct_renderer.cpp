@@ -209,6 +209,17 @@ void DirectRenderer::storeTexture(uint64_t hash, uint32_t format, uint32_t width
   t.packed.assign(packed, packed + size);
 }
 
+void DirectRenderer::replaceTexture(uint64_t key, uint32_t format, uint32_t width, uint32_t height,
+                                    const uint8_t *packed, size_t size) {
+  std::lock_guard<std::mutex> lock(m->textureLock);
+  State::Texture &t = m->textures[key];
+  t.format = D3DFORMAT(format);
+  t.width = width;
+  t.height = height;
+  t.packed.assign(packed, packed + size);
+  t.uiRegistered = false; // registered again, replacing the old, at its next use
+}
+
 void DirectRenderer::createMaterial(const MaterialDesc &d) {
   if (!m->active || m->materials.count(d.hash))
     return;

@@ -16,6 +16,8 @@ public:
   void shutdown() override;
   void storeTexture(uint64_t hash, uint32_t format, uint32_t width, uint32_t height, const uint8_t *packed,
                     size_t size) override;
+  void replaceTexture(uint64_t key, uint32_t format, uint32_t width, uint32_t height, const uint8_t *packed,
+                      size_t size) override;
   void createMaterial(const MaterialDesc &material) override;
   void createMesh(uint64_t key, const Vertex *vertices, uint32_t vertexCount, const uint32_t *indices,
                   uint32_t indexCount, uint64_t material, const Skinning &skinning) override;

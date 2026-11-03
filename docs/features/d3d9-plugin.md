@@ -77,7 +77,10 @@ or composited stays the real device's.
   or sheared projections). Sky draws (`rtx.skyBoxTextures`, a viewport from
   `rtx.skyMinZThreshold`, untextured draws before `rtx.skyDrawcallIdThreshold`)
   and view models are instances of those categories with their cameras.
-- **UI**: composited over the frame, in draw order, with its blend factors.
+- **UI**: composited over the frame, in draw order, with its blend factors. A
+  texture the game writes after its hash was taken keeps the hash, and UI draws
+  show its new contents (Source adds glyphs to its font pages as text needs
+  them). World materials keep their first contents.
 - Instances are double-sided: the raster backend and the path tracer disagree
   on a left-handed world's front faces.
 

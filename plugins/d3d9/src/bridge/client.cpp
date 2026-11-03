@@ -88,6 +88,12 @@ public:
     send(kStoreTexture, {{&texture, sizeof(texture)}, {packed, size}});
   }
 
+  void replaceTexture(uint64_t key, uint32_t format, uint32_t width, uint32_t height, const uint8_t *packed,
+                      size_t size) override {
+    TexturePacket texture = {key, format, width, height, 0};
+    send(kReplaceTexture, {{&texture, sizeof(texture)}, {packed, size}});
+  }
+
   void createMaterial(const MaterialDesc &material) override { send(kCreateMaterial, {{&material, sizeof(material)}}); }
 
   void createMesh(uint64_t key, const Vertex *vertices, uint32_t vertexCount, const uint32_t *indices,

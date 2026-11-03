@@ -34,6 +34,7 @@ struct ShaderCode;
 // A texture stage as the draw sees it.
 struct Stage {
   uint64_t hash = 0;        // the texture's dxvk-remix hash (0: none, or not hashable)
+  IDirect3DBaseTexture9 *texture = nullptr; // bound for the draw (not AddRef'd)
   bool bound = false;       // a texture is bound
   bool texture2D = false;   // a 2D texture (cube and volume textures are not taken)
   uint32_t states[33] = {}; // D3DTSS_*
@@ -72,6 +73,7 @@ struct Draw {
   // albedo, its states the blend state's (-1: none).
   int textureStage = -1;
   uint64_t texture0 = 0;     // that stage's texture hash
+  uint64_t uiTexture = 0;    // its current contents, on a UI draw (0: texture0's)
   // Its D3DTSS_* and D3DSAMP_* (stage 0's when none).
   const uint32_t *stage0() const { return stages[textureStage < 0 ? 0 : textureStage].states; }
   const uint32_t *sampler0() const { return stages[textureStage < 0 ? 0 : textureStage].samplers; }

@@ -106,6 +106,9 @@ public:
   // start; the runtime's texture is made when a material or UI uses it.
   virtual void storeTexture(uint64_t hash, uint32_t format, uint32_t width, uint32_t height, const uint8_t *packed,
                             size_t size) = 0;
+  // New contents for a texture UI draws name by `key`.
+  virtual void replaceTexture(uint64_t key, uint32_t format, uint32_t width, uint32_t height, const uint8_t *packed,
+                              size_t size) = 0;
   virtual void createMaterial(const MaterialDesc &material) = 0;
   virtual void createMesh(uint64_t key, const Vertex *vertices, uint32_t vertexCount, const uint32_t *indices,
                           uint32_t indexCount, uint64_t material, const Skinning &skinning) = 0;

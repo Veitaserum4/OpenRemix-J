@@ -174,6 +174,12 @@ int wmain(int argc, wchar_t **argv) {
       renderer.storeTexture(texture.hash, texture.format, texture.width, texture.height, in.bytes(size), size);
       break;
     }
+    case kReplaceTexture: {
+      const TexturePacket texture = in.take<TexturePacket>();
+      const size_t size = payload.size() - sizeof(texture);
+      renderer.replaceTexture(texture.hash, texture.format, texture.width, texture.height, in.bytes(size), size);
+      break;
+    }
     case kCreateMaterial:
       renderer.createMaterial(in.take<MaterialDesc>());
       break;

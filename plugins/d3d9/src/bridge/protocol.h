@@ -19,6 +19,7 @@ enum Command : uint16_t {
   kStart = 1,       // StartPacket, then the game directory and executable (UTF-8, a newline between)
   kShutdown,
   kStoreTexture,    // TexturePacket, then the packed level
+  kReplaceTexture,  // TexturePacket, then the packed level
   kCreateMaterial,  // MaterialDesc
   kCreateMesh,      // MeshPacket, then vertices, indices, weights, bone indices
   kDestroyMesh,     // uint64 key
