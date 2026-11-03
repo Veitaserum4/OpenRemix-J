@@ -200,10 +200,26 @@ namespace remix {
     return REMIXAPI_ERROR_CODE_SUCCESS;
   }
 
-  remixapi_ErrorCode RemixNativeRuntime::fail(VkResult result) {
+  remixapi_ErrorCode RemixNativeRuntime::fail(VkResult result, std::source_location where) {
     m_failed = true;
     m_deviceLost |= result == VK_ERROR_DEVICE_LOST;
-    SDL_Log("Remix Vulkan failure: %d", static_cast<int>(result));
+    // What was thrown, when it is an exception that brought this here.
+    std::string thrown;
+    if (const auto current = std::current_exception()) {
+      try {
+        std::rethrow_exception(current);
+      } catch (const std::exception &e) {
+        thrown = e.what();
+      } catch (remixapi_ErrorCode code) {
+        thrown = "API error " + std::to_string(int(code));
+      } catch (VkResult code) {
+        thrown = "VkResult " + std::to_string(int(code));
+      } catch (...) {
+        thrown = "an unknown exception";
+      }
+    }
+    SDL_Log("Remix Vulkan failure: %d at %s:%u%s%s", static_cast<int>(result), where.file_name(), where.line(),
+            thrown.empty() ? "" : ": ", thrown.c_str());
     return REMIXAPI_ERROR_CODE_GENERAL_FAILURE;
   }
 

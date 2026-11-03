@@ -40,6 +40,7 @@
 #include "ui/profiles.h"
 #include "scene/free_camera.h"
 #include "scene/up_axis.h"
+#include <source_location>
 #include <remix/remix_c.h>
 #include <remix/remix_editor_ext.h>
 #include <atomic>
@@ -281,7 +282,8 @@ private:
   // API's own (synchronous presentation) or the published frame's.
   RasterRenderer &renderer() { return m_asyncActive ? *m_frameScene : m_raster; }
   const RasterRenderer &renderer() const { return m_asyncActive ? *m_frameScene : m_raster; }
-  remixapi_ErrorCode fail(VkResult result = VK_ERROR_UNKNOWN);
+  remixapi_ErrorCode fail(VkResult result = VK_ERROR_UNKNOWN,
+                          std::source_location where = std::source_location::current());
   void destroySharedFrame();
   void sharedBarrier(VkCommandBuffer command, bool acquire);
   // Outside a render pass, after the composite wrote the target's depth.
