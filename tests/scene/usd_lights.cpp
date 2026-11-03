@@ -92,6 +92,34 @@ int main() {
       require(std::abs(.2126f * rgb[0] + .7152f * rgb[1] + .0722f * rgb[2] - 1) < 1e-4f,
               "temperature preserves luminance");
     }
+    // A game light as RTX Remix splits it: an override of its intensity alone
+    // keeps its color, not its radiance times the new intensity.
+    remixapi_LightInfoSphereEXT gameSphere{};
+    gameSphere.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_SPHERE_EXT;
+    gameSphere.radius = 4;
+    remixapi_LightInfo gameLight{};
+    gameLight.sType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO;
+    gameLight.hash = 21;
+    gameLight.pNext = &gameSphere;
+    gameLight.radiance = {200, 100, 0};
+    remixapi_LightHandle gameHandle{};
+    resources.createLight(gameLight, gameHandle);
+    remixapi_LightInfoUSDEXT gameOverride{};
+    float gameIntensity = 3;
+    gameOverride.pIntensity = &gameIntensity;
+    auto overridden = resources.overrideLight(gameHandle, 22, gameOverride, false, nullptr);
+    resources.drawLight(overridden);
+    require(resources.sphereLights()[0].radiance[0] == 3 && resources.sphereLights()[0].radiance[1] == 1.5f,
+            "game light intensity override");
+    resources.finishFrame();
+    gameOverride = {};
+    remixapi_Float3D gameColor{0, 1, 0};
+    gameOverride.pColor = &gameColor;
+    overridden = resources.overrideLight(gameHandle, 22, gameOverride, false, nullptr);
+    resources.drawLight(overridden);
+    require(resources.sphereLights()[0].radiance[0] == 0 && resources.sphereLights()[0].radiance[1] == 200,
+            "game light color override");
+    resources.finishFrame();
     uint8_t block[16] = {255, 0};
     remixapi_TextureInfo texture{};
     texture.width = texture.height = 4;

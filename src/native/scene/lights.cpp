@@ -250,7 +250,6 @@ namespace remix {
     source.height = height;
     source.length = span;
     source.angle = angle * pi / 180;
-    source.color = usd && usd->pColor ? *usd->pColor : info.radiance;
     if (usd) {
       source.transform = usd->transform;
       source.color = usd->pColor ? *usd->pColor : remixapi_Float3D{1, 1, 1};
@@ -259,6 +258,12 @@ namespace remix {
       source.temperature = value(usd->pColorTemp, 6500);
       source.temperatureEnabled = usd->pEnableColorTemp && *usd->pEnableColorTemp;
     } else {
+      // Normalized color and intensity, as dxvk-remix splits a game light: a
+      // mod's override of the intensity alone replaces its brightness.
+      const float brightness = std::max({radiance[0], radiance[1], radiance[2]});
+      if (brightness > 0)
+        source.color = {radiance[0] / brightness, radiance[1] / brightness, radiance[2] / brightness};
+      source.intensity = brightness;
       for (int c = 0; c < 3; ++c) {
         source.transform.matrix[c][0] = x[c];
         source.transform.matrix[c][1] = y[c];
