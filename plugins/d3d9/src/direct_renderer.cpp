@@ -167,6 +167,9 @@ bool DirectRenderer::start(HWND window, const Config &config, const std::filesys
   m->api.SetConfigVariable("rtx.zUp", config.zUp ? "1" : "0");
   const std::string scale = std::to_string(metersPerUnit(config));
   m->api.SetConfigVariable("rtx.native.pathtrace.sceneScale", scale.c_str());
+  // RTX Remix's lights have no cutoff. OpenRemix's default reach is 16 units,
+  // about a foot in a Source game: most lights would not reach a surface.
+  m->api.SetConfigVariable("rtx.native.pathtrace.localRange", "0");
   for (const auto &[key, value] : config.passthrough)
     m->api.SetConfigVariable(key.c_str(), value.c_str());
 
