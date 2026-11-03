@@ -7,6 +7,9 @@
 namespace remix::usd {
   using Json = nlohmann::json;
   namespace fs = std::filesystem;
+  // A material JSON subsurface's textures (scene.cpp material_json).
+  inline constexpr const char *subsurfaceTextureKeys[] = {"transmittance_texture", "thickness_texture",
+                                                          "single_scattering_texture", "radius_texture"};
   // What compose_scene composes: the whole stage, or the subtree at `root`;
   // meshes under `deferMeshesUnder` left out (composed later by root).
   struct ComposeScope {
