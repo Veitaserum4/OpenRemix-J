@@ -1,5 +1,6 @@
 #include "runtime/profiles.h"
 #include "ui/profiles.h"
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -26,6 +27,19 @@ int main(int argc, char **argv) {
   require(argc == 2, "Expected isolated test directory");
   const fs::path root = argv[1];
   fs::create_directories(root);
+  {
+    // RTX Remix's auto exposure range (rtx.autoExposure.evMin/MaxValue, EV100
+    // of the metered scene) becomes the path tracer's exposure bounds
+    // (log2 0.18/0.82x8 - EV), and is not written to profiles.
+    config::Settings remix;
+    require(config::set(remix, "rtx.autoExposure.evMinValue", "-4") == config::SetResult::Success &&
+                config::set(remix, "rtx.autoExposure.evMaxValue", "5") == config::SetResult::Success,
+            "Remix auto exposure keys");
+    require(std::abs(remix.trace.autoExposureMaxEv - 4.8124f) < 1e-4f &&
+                std::abs(remix.trace.autoExposureMinEv + 4.1876f) < 1e-4f,
+            "Remix EV range as exposure bounds");
+    require(config::serialize(remix).find("rtx.autoExposure") == std::string::npos, "aliases not saved");
+  }
   config::Settings changed;
   changed.backend = 0;
   changed.vsync = true;

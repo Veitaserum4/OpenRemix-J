@@ -52,6 +52,9 @@ namespace remix::api {
         std::strcmp(key, "rtx.native.frameGenerationBackend") == 0 ||
         std::strcmp(key, "rtx.native.frameGenerationFrames") == 0 ||
         std::strcmp(key, "rtx.native.lowLatency") == 0 ||
+        std::strcmp(key, "rtx.autoExposure.enabled") == 0 ||
+        std::strcmp(key, "rtx.autoExposure.evMinValue") == 0 ||
+        std::strcmp(key, "rtx.autoExposure.evMaxValue") == 0 ||
         std::strcmp(key, "rtx.native.gpuPassTimers") == 0 || std::strncmp(key, "rtx.native.sky.", 15) == 0 ||
         std::strncmp(key, "rtx.native.particles.", 21) == 0 ||
         std::strncmp(key, "rtx.atmosphere.", 15) == 0)

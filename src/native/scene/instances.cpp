@@ -416,12 +416,14 @@ namespace remix {
               if (p & ModParts::roughness) {
                 merged->roughness = mod->roughness;
                 merged->roughnessTexture = mod->roughnessTexture;
-                merged->remap[0] = mod->remap[0];
+                if (!mod->remap[0].identity())
+                  merged->remap[0] = mod->remap[0];
               }
               if (p & ModParts::metallic) {
                 merged->metallic = mod->metallic;
                 merged->metallicTexture = mod->metallicTexture;
-                merged->remap[1] = mod->remap[1];
+                if (!mod->remap[1].identity())
+                  merged->remap[1] = mod->remap[1];
               }
               if (p & ModParts::normal) {
                 merged->normalTexture = mod->normalTexture;

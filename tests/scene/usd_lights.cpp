@@ -61,6 +61,14 @@ int main() {
                 sphere.softness == softness && sphere.focus == focus,
             "spot shape and direction");
     resources.finishFrame();
+    // Softness past 1 is valid, as in RTX Remix (HL2 RTX authors 2).
+    float wideSoftness = 2;
+    usd.pConeSoftness = &wideSoftness;
+    resources.createLight(info, handle);
+    resources.drawLight(handle);
+    require(resources.sphereLights()[0].softness == wideSoftness, "cone softness past 1");
+    resources.finishFrame();
+    usd.pConeSoftness = &softness;
     usd.lightType = REMIXAPI_STRUCT_TYPE_LIGHT_INFO_DISTANT_EXT;
     resources.createLight(info, handle);
     resources.drawLight(handle);

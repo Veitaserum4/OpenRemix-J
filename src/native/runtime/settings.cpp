@@ -17,6 +17,7 @@ namespace remix::config {
       std::string key;
       std::function<std::string(const Settings &)> read;
       std::function<bool(Settings &, std::string_view)> write;
+      bool alias = false; // another name for what other keys hold: read, never written to profiles
     };
     template <typename T> std::string number(T value) {
       if constexpr (std::is_floating_point_v<T>)
@@ -345,6 +346,32 @@ namespace remix::config {
         TRACE(neuralUpliftMotionVectorScale, 0.01, 10);
         TRACE(neuralUpliftFeatureId, 0, 63);
         TRACE(neuralUpliftBypassCallerCheck, 0, 1);
+        // RTX Remix's auto exposure (rtx.autoExposure.*). Remix clamps the
+        // scene's metered EV100 to [evMinValue, evMaxValue] and exposes it
+        // to middle grey: exposure = 0.18 / (2^EV / 8 x 0.82) = 1.756 x 2^-EV.
+        // As this path tracer's exposure bounds: a game tuned for Remix
+        // (HL2 RTX: -4 to 5) keeps its range, so its lights' intensities
+        // read as they do there instead of being exposed away.
+        result.push_back(scalar("rtx.autoExposure.enabled", FIELD(trace.autoExposure), 0, 1));
+        result.back().alias = true;
+        {
+          constexpr float remixExposureBias = 0.8124f; // log2(0.18 / 0.82 x 8)
+          using Trace = decltype(Settings::trace);
+          auto evBound = [&](const char *key, float Trace::*bound, float low, float high) {
+            result.push_back({key,
+                              [=](const Settings &s) { return number(remixExposureBias - s.trace.*bound); },
+                              [=](Settings &s, std::string_view text) {
+                                float ev{};
+                                if (!parseFloat(text, ev) || !std::isfinite(ev))
+                                  return false;
+                                s.trace.*bound = std::clamp(remixExposureBias - ev, low, high);
+                                return true;
+                              },
+                              true});
+          };
+          evBound("rtx.autoExposure.evMinValue", &Trace::autoExposureMaxEv, 0.f, 24.f);
+          evBound("rtx.autoExposure.evMaxValue", &Trace::autoExposureMinEv, -24.f, 0.f);
+        }
         // Compatibility aliases for rtx.neuralUplift.*
         result.push_back(scalar("rtx.neuralUplift.enable", FIELD(trace.neuralUplift), 0, 1));
         result.push_back(scalar("rtx.neuralUplift.passes", FIELD(trace.neuralUpliftPasses), 1, 7));
@@ -492,7 +519,8 @@ namespace remix::config {
   std::string serialize(const Settings &settings, const UnknownSettings &unknown) {
     std::string text = "# OpenRemix configuration profile\nprofile.version = 1\n";
     for (const auto &entry : registry())
-      text += entry.key + " = " + entry.read(settings) + "\n";
+      if (!entry.alias)
+        text += entry.key + " = " + entry.read(settings) + "\n";
     for (const auto &[key, value] : settings.sky.atmosphere)
       text += key + " = " + value + "\n";
     if (!unknown.empty())

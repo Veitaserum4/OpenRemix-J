@@ -282,10 +282,11 @@ namespace remix {
     std::copy(position.begin(), position.end(), prototype.position);
     std::copy(radiance.begin(), radiance.end(), prototype.radiance);
     if (shaped) {
+      // Softness past 1 is valid, as in RTX Remix (HL2 RTX authors 2): the
+      // shader clamps it (emitterShaping).
       if (!std::isfinite(shaping.coneAngleDegrees) || shaping.coneAngleDegrees < 0 ||
           shaping.coneAngleDegrees > 180 || !std::isfinite(shaping.coneSoftness) ||
-          shaping.coneSoftness < 0 || shaping.coneSoftness > 1 || !std::isfinite(shaping.focusExponent) ||
-          shaping.focusExponent < 0)
+          shaping.coneSoftness < 0 || !std::isfinite(shaping.focusExponent) || shaping.focusExponent < 0)
         throw invalid;
       auto d = unit(vec(shaping.direction));
       std::copy(d.begin(), d.end(), prototype.direction);

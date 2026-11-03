@@ -113,8 +113,14 @@ its own.
 
 A mod's light scale multiplies the intensity of the lights it authors: lights
 under its replacements, and the intensities its light overrides set. Lights
-made for RTX Remix read brighter here, mostly from exposure: the light math is
-the same (color × intensity × 2^exposure). The scale is the root layer's
+made for RTX Remix can read brighter here. Radiance is the same (color ×
+intensity × 2^exposure), but cone softness is not: Remix takes
+`smoothstep(cos(cone), cos(cone) + softness, cos(angle))`, which dims a light
+even on its axis at high softness, and this renderer takes softness as a
+fraction of the cone, clamped to 1. RTX Remix's auto exposure range
+(`rtx.autoExposure.evMinValue`, `evMaxValue`) maps to the path tracer's
+exposure bounds. Inside that range auto exposure cancels a scale, so it mostly
+changes the balance against the sky and the game's own lights. The scale is the root layer's
 `customLayerData` value `openremix:lightScale` (a double, default 1). **Mods →
 (mod) → Light scale** changes it for the session, and **Save** writes it into
 the mod's `mod.usda`, which USD reformats.

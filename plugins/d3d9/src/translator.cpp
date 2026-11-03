@@ -83,7 +83,8 @@ std::vector<UiCommand> g_uiCommands;
 uint32_t g_kinds[4] = {}; // draws per DrawKind this frame
 // openremix.hashLog: the material textures, replacement keys (each with its
 // geometry asset hash and texture) and lights seen.
-std::set<uint64_t> g_seenTextures, g_seenLights;
+std::set<uint64_t> g_seenTextures;
+std::map<uint64_t, D3DLIGHT9> g_seenLights;
 std::map<uint64_t, std::pair<uint64_t, uint64_t>> g_seenReplacements;
 
 void writeHashLog() {
@@ -95,8 +96,13 @@ void writeHashLog() {
   for (const auto &[key, parts] : g_seenReplacements)
     std::fprintf(file, "mesh %016llX asset %016llX texture %016llX\n", static_cast<unsigned long long>(key),
                  static_cast<unsigned long long>(parts.first), static_cast<unsigned long long>(parts.second));
-  for (uint64_t hash : g_seenLights)
-    std::fprintf(file, "light %016llX\n", static_cast<unsigned long long>(hash));
+  for (const auto &[hash, l] : g_seenLights)
+    std::fprintf(file,
+                 "light %016llX type %d position %.1f %.1f %.1f direction %.3f %.3f %.3f diffuse %.3f %.3f %.3f "
+                 "range %.1f attenuation %.5f %.5f %.5f\n",
+                 static_cast<unsigned long long>(hash), int(l.Type), l.Position.x, l.Position.y, l.Position.z,
+                 l.Direction.x, l.Direction.y, l.Direction.z, l.Diffuse.r, l.Diffuse.g, l.Diffuse.b, l.Range,
+                 l.Attenuation0, l.Attenuation1, l.Attenuation2);
   std::fclose(file);
 }
 
@@ -271,7 +277,7 @@ uint64_t lightHash(const D3DLIGHT9 &l) {
 void addLight(const D3DLIGHT9 &l) {
   const uint64_t hash = lightHash(l);
   if (!g_config.hashLog.empty())
-    g_seenLights.insert(hash);
+    g_seenLights.try_emplace(hash, l);
   if (g_config.ignoreLights.count(hash))
     return;
   auto [it, created] = g_lights.try_emplace(hash, g_frame);
@@ -281,7 +287,7 @@ void addLight(const D3DLIGHT9 &l) {
   const float brightness = std::max({l.Diffuse.r, l.Diffuse.g, l.Diffuse.b});
   if (brightness <= 0)
     return;
-  const float color[3] = {l.Diffuse.r / brightness, l.Diffuse.g / brightness, l.Diffuse.b / brightness};
+  float color[3] = {l.Diffuse.r / brightness, l.Diffuse.g / brightness, l.Diffuse.b / brightness};
   auto normalized = [](const D3DVECTOR &v, float (&out)[3]) {
     const float length = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
     out[0] = length > 0 ? v.x / length : 0, out[1] = length > 0 ? v.y / length : 0,
@@ -290,9 +296,11 @@ void addLight(const D3DLIGHT9 &l) {
   LightDesc desc = {};
   float radiance;
   if (l.Type == D3DLIGHT_DIRECTIONAL) {
-    // A fixed intensity of 1 W/sr spread over the light's disc.
-    const float half = kDistantLightAngle / 2;
-    radiance = 1.0f / (kPi * std::sin(half) * std::sin(half));
+    // dxvk-remix LightData::createFromDirectional: its diffuse as it is, at
+    // rtx.lightConversionDistantLightFixedIntensity (1). Faint in a path
+    // tracer: games made for Remix light with their mods instead.
+    color[0] = l.Diffuse.r, color[1] = l.Diffuse.g, color[2] = l.Diffuse.b;
+    radiance = 1;
     desc.distant = 1;
     normalized(l.Direction, desc.direction);
     desc.angularDiameter = kDistantLightAngle * 180 / kPi;
