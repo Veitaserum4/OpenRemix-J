@@ -26,8 +26,11 @@ namespace remix::scene {
     // up to and including each, shaping[3] its own share (the shader picks
     // one by it: light_bvh.glsl leafEmitter).
     uint32_t links[4] = {};
+    // The directions its emitters emit in: an axis, and the cosine of the half
+    // angle around it (-1: every direction).
+    float cone[4] = {0, 0, 1, -1};
   };
-  static_assert(sizeof(LightEmitter) == 112 && sizeof(LightNode) == 48);
+  static_assert(sizeof(LightEmitter) == 112 && sizeof(LightNode) == 64);
   // Dev aid (lighttree.request, api/lifecycle.cpp): the renderer saves its
   // next combined light tree to this path (LightBvh::save) and clears it.
   inline std::mutex g_lightTreeSaveMutex;

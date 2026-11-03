@@ -65,6 +65,9 @@ float regirWeight(LightNode node,vec3 lo,vec3 hi) {
   vec3 nearest=max(abs(delta)-halfSize-.5*(hi-lo),vec3(0));
   float near2=dot(nearest,nearest),radius2=dot(halfSize,halfSize);
   float distance2=max(sqrt(near2*dot(delta,delta)),.01*radius2);
+  // Any point in the cell: the two boxes' radii add.
+  float reach=sqrt(radius2)+.5*length(hi-lo);
+  if(!lightConeReaches(node,delta,reach*reach))return 0;
   return localFalloff(near2)*node.minimumPower.w/max(max(distance2,node.maximum.w),1e-12);
 }
 #ifdef REGIR_PRESAMPLE_PASS

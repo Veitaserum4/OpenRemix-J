@@ -1,5 +1,6 @@
 #include "scene/blackbody.h"
 #include "scene/images.h"
+#include "scene/light_bvh.h"
 #include "scene/resources.h"
 #include <algorithm>
 #include <cmath>
@@ -120,6 +121,50 @@ int main() {
     require(resources.sphereLights()[0].radiance[0] == 0 && resources.sphereLights()[0].radiance[1] == 200,
             "game light color override");
     resources.finishFrame();
+    // The light tree picks no node that cannot emit toward the point, and only
+    // those: the weight is 0 exactly where the light gives 0.
+    remix::scene::SphereLight spot{};
+    spot.id = 1;
+    spot.radius = 1;
+    spot.radiance[0] = spot.radiance[1] = spot.radiance[2] = 1;
+    spot.direction[2] = -1;
+    spot.coneCos = std::cos(30 * 3.14159265f / 180);
+    const auto weightAt = [](const std::vector<remix::scene::SphereLight> &lights, float x, float y, float z) {
+      remix::scene::LightBvh tree;
+      tree.update(lights);
+      const float length = std::sqrt(x * x + y * y + z * z);
+      const float position[3] = {x, y, z}, normal[3] = {-x / length, -y / length, -z / length};
+      return remix::scene::LightBvh::weight(tree.nodes()[0], position, normal);
+    };
+    const float rim = std::tan(29 * 3.14159265f / 180) * 100, past = std::tan(35 * 3.14159265f / 180) * 100;
+    require(weightAt({spot}, 0, 0, -100) > 0, "a spot reaches along its axis");
+    require(weightAt({spot}, rim, 0, -100) > 0, "a spot reaches inside its rim");
+    require(weightAt({spot}, past, 0, -100) == 0, "a spot is not picked past its rim");
+    require(weightAt({spot}, 0, 0, 100) == 0, "a spot is not picked behind it");
+    require(weightAt({spot}, 2, 0, -.5f) > 0, "the light's size widens the bound up close");
+    auto bare = spot;
+    bare.coneCos = -1;
+    require(weightAt({bare}, 0, 0, 100) > 0 && weightAt({bare}, past, 0, -100) > 0, "an unshaped light reaches all");
+    // Two spots in one tree: picked toward either, and not away from both.
+    auto second = spot;
+    second.id = 2;
+    second.direction[0] = 1, second.direction[2] = 0;
+    second.position[0] = 4;
+    const std::vector<remix::scene::SphereLight> both{spot, second};
+    require(weightAt(both, 0, 0, -100) > 0 && weightAt(both, 100, 0, 0) > 0, "a node reaches where its lights do");
+    require(weightAt(both, -100, 0, 100) == 0, "a node is not picked where none of its lights reach");
+    // A one-sided triangle emits along its normal (+Z here) only.
+    remix::scene::SphereLight triangle{};
+    triangle.id = 3;
+    triangle.triangle = 1;
+    triangle.radius = 1;
+    triangle.radiance[0] = 1;
+    triangle.corners[1][0] = 1;
+    triangle.corners[2][1] = 1;
+    require(weightAt({triangle}, 0, 0, 100) > 0, "a triangle emits along its normal");
+    require(weightAt({triangle}, 0, 0, -100) == 0, "a one-sided triangle does not emit behind it");
+    triangle.triangle = 2;
+    require(weightAt({triangle}, 0, 0, -100) > 0, "a two-sided triangle emits both ways");
     uint8_t block[16] = {255, 0};
     remixapi_TextureInfo texture{};
     texture.width = texture.height = 4;

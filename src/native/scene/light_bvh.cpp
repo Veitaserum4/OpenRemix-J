@@ -27,6 +27,60 @@ namespace remix::scene {
     double lightPower(const SphereLight &light) {
       return powerScale(light) * (.2126 * light.radiance[0] + .7152 * light.radiance[1] + .0722 * light.radiance[2]);
     }
+    // LightNode::cone of one light: its spot cone, else a one-sided triangle's
+    // hemisphere (emitterShaping, triangleCandidate).
+    void emissionCone(const SphereLight &light, float cone[4]) {
+      cone[0] = cone[1] = 0, cone[2] = 1, cone[3] = -1;
+      if (light.coneCos > -1) {
+        std::copy_n(light.direction, 3, cone);
+        cone[3] = light.coneCos;
+      } else if (light.triangle == 1) {
+        double a[3], b[3];
+        for (unsigned c = 0; c < 3; ++c) {
+          a[c] = double(light.corners[1][c]) - light.corners[0][c];
+          b[c] = double(light.corners[2][c]) - light.corners[0][c];
+        }
+        const double x = a[1] * b[2] - a[2] * b[1], y = a[2] * b[0] - a[0] * b[2], z = a[0] * b[1] - a[1] * b[0];
+        const double length = std::sqrt(x * x + y * y + z * z);
+        if (length > 0) {
+          cone[0] = float(x / length), cone[1] = float(y / length), cone[2] = float(z / length);
+          cone[3] = 0;
+        }
+      }
+    }
+    // Widens `into` to hold `other` too (Conty Estevez and Kulla, 2018).
+    void uniteCones(float into[4], const float other[4]) {
+      if (std::equal(into, into + 4, other))
+        return;
+      const auto everywhere = [&] { into[0] = into[1] = 0, into[2] = 1, into[3] = -1; };
+      if (into[3] <= -1 || other[3] <= -1)
+        return everywhere();
+      constexpr double pi = 3.141592653589793;
+      const double a = std::acos(std::clamp(double(into[3]), -1., 1.)),
+                   b = std::acos(std::clamp(double(other[3]), -1., 1.));
+      const double between = std::acos(std::clamp(
+          double(into[0]) * other[0] + double(into[1]) * other[1] + double(into[2]) * other[2], -1., 1.));
+      if (a >= between + b)
+        return;
+      if (b >= between + a) {
+        std::copy_n(other, 4, into);
+        return;
+      }
+      const double half = (a + b + between) / 2, sine = std::sin(between);
+      if (half >= pi || sine < 1e-4)
+        return everywhere();
+      // Rotated from `into` toward `other` until both edges fit.
+      const double turn = half - a, from = std::sin(between - turn) / sine, to = std::sin(turn) / sine;
+      double axis[3], length = 0;
+      for (unsigned c = 0; c < 3; ++c) {
+        axis[c] = from * into[c] + to * other[c];
+        length += axis[c] * axis[c];
+      }
+      length = std::sqrt(length);
+      for (unsigned c = 0; c < 3; ++c)
+        into[c] = float(axis[c] / length);
+      into[3] = float(std::cos(half));
+    }
     // A run of leaves' emitter positions and count, for choosing splits.
     struct Extent {
       float minimum[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
@@ -943,14 +997,23 @@ namespace remix::scene {
       std::fill_n(node.minimumPower, 3, std::numeric_limits<float>::max());
       std::fill_n(node.maximum, 4, std::numeric_limits<float>::lowest());
       double running = 0;
+      bool coned = false;
       for (uint32_t e = first; e < first + count; ++e) {
         const auto &light = m_lights[e];
         const double own = power(light);
-        if (own > 0 || total == 0)
+        if (own > 0 || total == 0) {
           for (unsigned c = 0; c < 3; ++c) {
             node.minimumPower[c] = std::min(node.minimumPower[c], light.position[c] - light.radius);
             node.maximum[c] = std::max(node.maximum[c], light.position[c] + light.radius);
           }
+          float cone[4];
+          emissionCone(light, cone);
+          if (coned)
+            uniteCones(node.cone, cone);
+          else
+            std::copy_n(cone, 4, node.cone);
+          coned = true;
+        }
         node.maximum[3] = std::max(node.maximum[3], light.radius * light.radius);
         const double share = total > 0 ? own / total : 1. / count;
         running += share;
@@ -966,12 +1029,15 @@ namespace remix::scene {
         const auto &live = a.minimumPower[3] > 0 ? a : b;
         std::copy_n(live.minimumPower, 3, node.minimumPower);
         std::copy_n(live.maximum, 4, node.maximum);
+        std::copy_n(live.cone, 4, node.cone);
       } else {
         for (unsigned c = 0; c < 3; ++c) {
           node.minimumPower[c] = std::min(a.minimumPower[c], b.minimumPower[c]);
           node.maximum[c] = std::max(a.maximum[c], b.maximum[c]);
         }
         node.maximum[3] = std::max(a.maximum[3], b.maximum[3]);
+        std::copy_n(a.cone, 4, node.cone);
+        uniteCones(node.cone, b.cone);
       }
       node.minimumPower[3] = a.minimumPower[3] + b.minimumPower[3];
     }
@@ -997,7 +1063,7 @@ namespace remix::scene {
 
   double LightBvh::weight(const LightNode &node, const float position[3], const float normal[3],
                           double range) {
-    double distance2 = 0, radius2 = 0, toward = 0, reach = 0, nearest2 = 0;
+    double distance2 = 0, radius2 = 0, toward = 0, reach = 0, nearest2 = 0, along = 0;
     for (unsigned c = 0; c < 3; ++c) {
       const double half = .5 * (node.maximum[c] - node.minimumPower[c]);
       const double delta = .5 * (node.maximum[c] + node.minimumPower[c]) - position[c];
@@ -1005,6 +1071,7 @@ namespace remix::scene {
       radius2 += half * half;
       toward += delta * normal[c];
       reach += half * std::abs(normal[c]);
+      along -= delta * node.cone[c];
       const double nearest = std::max(std::abs(delta) - half, 0.);
       nearest2 += nearest * nearest;
     }
@@ -1012,6 +1079,15 @@ namespace remix::scene {
     // (light_bvh.glsl).
     if (toward + reach <= 0)
       return 0;
+    // Or when nothing in it emits toward the point (lightConeReaches).
+    if (radius2 < distance2) {
+      const double sinBox2 = radius2 / distance2, cosBox = std::sqrt(1 - sinBox2), cosCone = node.cone[3];
+      const double bound = cosCone <= -cosBox ? -1
+                                              : cosCone * cosBox - std::sqrt(std::max(1 - cosCone * cosCone, 0.)) *
+                                                                       std::sqrt(sinBox2);
+      if (along / std::sqrt(distance2) < bound - 1e-3)
+        return 0;
+    }
     const double cosine =
         std::min(1., (toward + std::sqrt(radius2)) / std::sqrt(std::max({distance2, radius2, 1.e-12})));
     // Nearest-box times center distance (light_bvh.glsl).

@@ -1,7 +1,7 @@
 // Analytic sphere next-event estimation, RT Gems I chapter 18. The selection
 // PDF and solid-angle PDF both belong in the estimator. No light-count ray loop.
 struct LightEmitter { vec4 positionRadius; vec4 radiance; vec4 corners[3]; vec4 directionCone; vec4 shaping; };
-struct LightNode { vec4 minimumPower; vec4 maximum; uvec4 links; };
+struct LightNode { vec4 minimumPower; vec4 maximum; uvec4 links; vec4 cone; };
 layout(buffer_reference,std430,buffer_reference_align=16) readonly buffer LightEmitters { LightEmitter data[]; };
 layout(buffer_reference,std430,buffer_reference_align=16) readonly buffer LightNodes { LightNode data[]; };
 float lightRandom(inout uint state) {
@@ -30,6 +30,17 @@ float localFalloff(float distance2) {
   float t=clamp((distance2*frame.localScale.w-.5625)*(16.0/7.0),0,1);
   return reach<=0?1:(1-t)*(1-t)*(1+2*t);
 }
+// Whether a node's emitters can emit toward a point at `delta` from it (the
+// node's center less the point), radius2 the squared radius of what it covers
+// as seen from there. A spot aimed elsewhere otherwise takes the samples of
+// the lights that do reach the point: a selection weight of 0 where every
+// emitter of the node gives 0 loses no energy. (Conty Estevez and Kulla, 2018.)
+bool lightConeReaches(LightNode node,vec3 delta,float radius2) {
+  float distance2=dot(delta,delta),sinBox2=radius2/max(distance2,1e-12);
+  float cosBox=sqrt(max(1-sinBox2,0)),cosCone=node.cone.w;
+  float bound=cosCone<=-cosBox?-1:cosCone*cosBox-sqrt(max(1-cosCone*cosCone,0))*sqrt(sinBox2);
+  return radius2>=distance2||-dot(delta,node.cone.xyz)*inversesqrt(max(distance2,1e-12))>=bound-1e-3;
+}
 float lightWeight(LightNode node,vec3 p,vec3 n) {
   vec3 halfSize=.5*(node.maximum.xyz-node.minimumPower.xyz);
   vec3 delta=.5*(node.maximum.xyz+node.minimumPower.xyz)-p;
@@ -53,7 +64,7 @@ float lightWeight(LightNode node,vec3 p,vec3 n) {
   // center distance keeps nearby boxes ahead of far ones.
   float distance2=max(sqrt(dot(nearest,nearest)*dot(delta,delta)),.01*radius2);
   float weight=localFalloff(dot(nearest,nearest))*node.minimumPower.w*cosine/max(max(distance2,node.maximum.w),1e-12);
-  return facing?weight:0;
+  return facing&&lightConeReaches(node,delta,radius2)?weight:0;
 }
 // Potentially visible lights (remixapi_SetVisibilityPartitionEXT): the
 // shading point's cluster comes from the host's BSP; a table row per cluster
