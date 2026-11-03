@@ -272,8 +272,13 @@ void DirectRenderer::createMesh(uint64_t key, const Vertex *vertices, uint32_t v
   info.surfaces_values = &surface;
   info.surfaces_count = 1;
   remixapi_MeshHandle handle = nullptr;
-  if (m->api.CreateMesh(&info, &handle) != REMIXAPI_ERROR_CODE_SUCCESS)
+  if (const remixapi_ErrorCode error = m->api.CreateMesh(&info, &handle); error != REMIXAPI_ERROR_CODE_SUCCESS) {
+    // Its draws are lost: neither the mesh nor a replacement of it draws.
+    static int reported = 0;
+    if (reported++ < 8)
+      log("CreateMesh failed: %d (%u vertices, %u bones a vertex)", int(error), vertexCount, skinning.bonesPerVertex);
     handle = nullptr;
+  }
   m->meshes[key] = handle;
 }
 

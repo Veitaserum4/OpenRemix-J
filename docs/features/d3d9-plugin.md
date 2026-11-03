@@ -63,8 +63,9 @@ or composited stays the real device's.
   stage, binned by texture coordinate set, lightmaps left out); its texture's
   hash keys it. Fixed-function vertex blending (`D3DRS_VERTEXBLEND`, indexed
   or not) becomes the mesh's blend weights and the instance's bone transforms
-  (`D3DTS_WORLDMATRIX(n)`). The bones are in the draw's object space and go to
-  the world through the draw's view and out through the camera's, as
+  (`D3DTS_WORLDMATRIX(n)`). The bones are in the draw's object space; the
+  instance's transform takes that to the world through the draw's view and out
+  through the camera's, as
   dxvk-remix decomposes them. Source's fixed-function path puts a model's
   placement in its view matrix. The plugin keeps all 256 world matrices
   itself: a hardware vertex processing device forgets those past its
@@ -76,7 +77,9 @@ or composited stays the real device's.
   to `rtx.viewModel.maxZThreshold`) or sky camera's, or no camera's (identity
   or sheared projections). Sky draws (`rtx.skyBoxTextures`, a viewport from
   `rtx.skyMinZThreshold`, untextured draws before `rtx.skyDrawcallIdThreshold`)
-  and view models are instances of those categories with their cameras.
+  and view models are instances of those categories with their cameras. A view
+  model of skinned draws alone takes the camera they were placed with, through
+  their field of view: the runtime rasterizes a view model with no camera.
 - **UI**: composited over the frame, in draw order, with its blend factors. A
   texture the game writes after its hash was taken keeps the hash, and UI draws
   show its new contents (Source adds glyphs to its font pages as text needs

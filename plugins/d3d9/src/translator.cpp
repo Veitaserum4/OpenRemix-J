@@ -56,6 +56,7 @@ std::vector<Instance> g_instances;
 struct Camera {
   bool set = false;
   D3DMATRIX view, projection;
+  bool fromSkinned = false; // a draw that sets up a camera replaces it
 };
 Camera g_cameras[3];
 Camera g_lastMain;
@@ -485,7 +486,8 @@ struct Skin {
   std::vector<float> weights;
   std::vector<uint32_t> indices;
   std::vector<D3DMATRIX> matrices; // D3DTS_WORLDMATRIX(0..)
-  std::vector<remixapi_Transform> bones; // in the world (place)
+  std::vector<remixapi_Transform> bones; // in the draw's object space
+  D3DMATRIX placement = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}}; // that space in the world (place)
   int single = -1; // the one matrix used
   D3DMATRIX singleMatrix;
 };
@@ -507,10 +509,11 @@ bool skinning(const Draw &d, const Mesh &m, Skin &out) {
     float sum = 0;
     for (uint32_t k = 0; k < given; ++k) {
       const float w = m.weights[size_t(v) * m.weightCount + k];
-      out.weights[size_t(v) * per + k] = w;
+      out.weights[size_t(v) * per + k] = std::max(w, 0.0f);
       sum += w;
     }
-    out.weights[size_t(v) * per + given] = 1 - sum;
+    // Float error can leave less than nothing, which the runtime refuses.
+    out.weights[size_t(v) * per + given] = std::max(1 - sum, 0.0f);
     for (uint32_t k = 0; k < per; ++k) {
       const uint32_t bone = indexed ? std::min(m.blendIndices[size_t(v) * 4 + k], 255u) : k;
       out.indices[size_t(v) * per + k] = bone;
@@ -534,18 +537,17 @@ bool skinning(const Draw &d, const Mesh &m, Skin &out) {
 // viewToWorld x objectToView). Identity where the draw's view is the
 // camera's.
 void place(Skin &skin, const D3DMATRIX &drawView, const D3DMATRIX *cameraView) {
-  D3DMATRIX placement = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}};
   D3DMATRIX inverse;
   if (cameraView && invert(*cameraView, inverse))
-    placement = multiply(drawView, inverse);
+    skin.placement = multiply(drawView, inverse);
   if (skin.single >= 0) {
-    skin.singleMatrix = multiply(skin.singleMatrix, placement);
+    skin.singleMatrix = multiply(skin.singleMatrix, skin.placement);
     return;
   }
   skin.bones.resize(skin.matrices.size());
   for (size_t i = 0; i < skin.matrices.size(); ++i) {
     float t[3][4];
-    transformOf(multiply(skin.matrices[i], placement), t);
+    transformOf(skin.matrices[i], t);
     std::memcpy(skin.bones[i].matrix, t, sizeof(t));
   }
 }
@@ -602,6 +604,12 @@ bool worldDraw(const Draw &d) {
                          : g_lastMain.set                             ? &g_lastMain
                                                                       : nullptr;
     place(skin, d.view, view ? &view->view : nullptr);
+    // A view model of skinned draws alone sets up no camera, and the runtime
+    // rasterizes a view model without one: the camera they were placed with,
+    // through their field of view.
+    Camera &viewModel = g_cameras[size_t(CameraClass::ViewModel)];
+    if (camera == CameraClass::ViewModel && !viewModel.set && view)
+      viewModel = {true, view->view, d.projection, true};
   }
   if (g_drawLog && skinned && !geometry->mesh.vertices.empty()) {
     // Where the first vertex lands (drawLog): its bones, blended.
@@ -615,22 +623,23 @@ bool worldDraw(const Draw &d) {
     } else {
       for (uint32_t k = 0; k < skin.bonesPerVertex; ++k) {
         const float w = skin.weights[k];
-        const auto &t = skin.bones[skin.indices[k]].matrix;
-        for (int r = 0; r < 3; ++r)
-          world[r] += w * (t[r][0] * p[0] + t[r][1] * p[1] + t[r][2] * p[2] + t[r][3]);
+        const D3DMATRIX t = multiply(skin.matrices[skin.indices[k]], skin.placement);
+        for (int c = 0; c < 3; ++c)
+          world[c] += w * (p[0] * t.m[0][c] + p[1] * t.m[1][c] + p[2] * t.m[2][c] + t.m[3][c]);
       }
     }
-    char line[256];
+    char line[320];
     std::snprintf(line, sizeof(line),
                   "  skinned: %u per vertex, %zu bones, single %d, first index %u, vertex (%.1f %.1f %.1f) -> "
-                  "(%.1f %.1f %.1f), camera %d\n",
+                  "(%.1f %.1f %.1f), camera %d, replacement key %016llX\n",
                   skin.bonesPerVertex, skin.bones.size(), skin.single, skin.indices.empty() ? 0u : skin.indices[0],
-                  p[0], p[1], p[2], world[0], world[1], world[2], int(camera));
+                  p[0], p[1], p[2], world[0], world[1], world[2], int(camera),
+                  static_cast<unsigned long long>(geometry->asset ? geometry->asset ^ d.texture0 : 0));
     std::fputs(line, g_drawLog);
   }
   if (updatesCamera && camera != CameraClass::Unknown) {
     Camera &c = g_cameras[size_t(camera)];
-    if (!c.set) {
+    if (!c.set || c.fromSkinned) {
       c = {true, d.view, d.projection};
       if (camera == CameraClass::Main)
         noteFog(d);
@@ -678,12 +687,14 @@ bool worldDraw(const Draw &d) {
   Instance instance = {};
   InstanceDesc &desc = instance.desc;
   desc.mesh = key;
-  // Skinned vertices go to the world through their bones.
+  // Skinned vertices go through their bones, then the draw's placement: what
+  // a replacement's own transform goes between (dxvk-remix).
   static const D3DMATRIX identity = {{{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}}};
   // A captured draw's vertices are in object space, or in world space without
   // rtx.useWorldMatricesForShaders.
   const bool worldSpace = d.shader && !g_config.useWorldMatricesForShaders;
-  transformOf(skin.single >= 0 ? skin.singleMatrix : skinMesh || worldSpace ? identity : d.world, desc.transform);
+  transformOf(skin.single >= 0 ? skin.singleMatrix : skinMesh ? skin.placement : worldSpace ? identity : d.world,
+              desc.transform);
   if (skinMesh) {
     instance.bones = std::move(skin.bones);
     desc.boneCount = uint32_t(instance.bones.size());
