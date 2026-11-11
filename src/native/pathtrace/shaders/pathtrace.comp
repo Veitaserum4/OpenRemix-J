@@ -838,7 +838,21 @@ bool portalTeleport(uint surface,vec3 p,inout vec3 origin,inout vec3 direction,i
   if(code==0u||portals>=min(limit,8u))return false;
   uint index=code-1u;
   vec4 front=frame.rayPortals[index*4u+3u];
-  if((uint(front.w)&1u)==0u||dot(direction,front.xyz)>=0)return false;
+  if((uint(front.w)&1u)==0u)return false;
+  // A portal over an opaque surface (state.w bit 26: a screen showing another
+  // place, its MaterialInfo chaining the portal extension): the surface is
+  // the opening, from wherever a ray meets it. The ray goes on from where the
+  // map takes the point, along the mapped direction, without the doorway's
+  // front test or exit plane (what the screen shows is the partner's view in
+  // every direction, as a game renders it from its camera there).
+  if((surfaces[surface].state.w&(1u<<26))!=0u) {
+    origin=portalPoint(index,p);
+    direction=normalize(portalVector(index,direction));
+    origin=offsetRay(origin,direction);
+    chain|=index<<(4u*portals);++portals;
+    return true;
+  }
+  if(dot(direction,front.xyz)>=0)return false;
   // The front is told by the ray's direction, not the hit's facing (the
   // host's portal mesh may be double-sided). A mesh standing off its plane
   // maps behind the partner's (in its wall): the ray starts where it crosses
