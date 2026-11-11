@@ -831,6 +831,8 @@ vec3 offsetRay(vec3 p,vec3 n) {
 // Continues a ray meeting `surface` at p from the partner of the ray portal
 // the surface opens (remixapi_MaterialInfoPortalEXT); false where the ray ends
 // there: no portal, its back, its pair not open, or `limit` portals passed.
+// (TEMPORAL only, where the portal maps are; other variants pass none.)
+#ifdef TEMPORAL
 bool portalTeleport(uint surface,vec3 p,inout vec3 origin,inout vec3 direction,inout uint portals,inout uint chain,uint limit) {
   uint code=(surfaces[surface].state.w>>22)&15u;
   if(code==0u||portals>=min(limit,8u))return false;
@@ -854,6 +856,11 @@ bool portalTeleport(uint surface,vec3 p,inout vec3 origin,inout vec3 direction,i
   chain|=index<<(4u*portals);++portals;
   return true;
 }
+#else
+bool portalTeleport(uint surface,vec3 p,inout vec3 origin,inout vec3 direction,inout uint portals,inout uint chain,uint limit) {
+  return false;
+}
+#endif
 // A translucent body's refractive index and measurement distance at a sheet
 // (zero: none). A sheet from the raster G-buffer carries no material record:
 // its ray is traced again for it.
