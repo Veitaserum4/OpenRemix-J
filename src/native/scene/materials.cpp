@@ -144,6 +144,11 @@ namespace remix {
       material->reference = float(opaque->alphaReferenceValue) / 255;
       material->drawAlpha = opaque->useDrawCallAlphaState != 0;
       material->translucent = opaque->opacityConstant < 1;
+      if (const auto *effects = static_cast<const remixapi_MaterialInfoViewEffectsEXT *>(
+              extension(info.pNext, REMIXAPI_STRUCT_TYPE_MATERIAL_VIEW_EFFECTS_EXT))) {
+        finite(&effects->chromaticAberration, 1);
+        material->chromaticAberration = std::clamp(effects->chromaticAberration, 0.f, 1.f / 240);
+      }
       if (const auto *screen = static_cast<const remixapi_MaterialInfoScreenCameraEXT *>(
               extension(info.pNext, REMIXAPI_STRUCT_TYPE_MATERIAL_INFO_SCREEN_CAMERA_EXT))) {
         if (screen->slot >= REMIXAPI_SCREEN_CAMERA_SLOTS_EXT)

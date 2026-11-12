@@ -282,6 +282,21 @@ typedef struct remixapi_InstanceInfoCameraOnlyEXT {
   const void *pNext;
 } remixapi_InstanceInfoCameraOnlyEXT;
 
+// Optional MaterialInfo pNext (after its Opaque struct) on a material that
+// shows another view: a screen (remixapi_MaterialInfoScreenCameraEXT) or a
+// ray portal over an opaque surface. What it shows takes the effects of a
+// game's screen shader, applied to the final image where its pixels show:
+// chromaticAberration displaces the red channel right and the blue channel
+// left of the green by this fraction of the output's width (0 none, at most
+// 1/240); a neighbouring pixel lends its channel only where it shows such a
+// view too.
+#define REMIXAPI_STRUCT_TYPE_MATERIAL_VIEW_EFFECTS_EXT ((remixapi_StructType)0x7fff1078)
+typedef struct remixapi_MaterialInfoViewEffectsEXT {
+  remixapi_StructType sType;
+  const void *pNext;
+  float chromaticAberration;
+} remixapi_MaterialInfoViewEffectsEXT;
+
 // Optional TextureInfo pNext. With `generate` set and a single supplied level
 // (mipLevels = 1), the runtime completes the texture with a box-filtered mip
 // chain (sRGB colors averaged in linear space). For hosts that capture only a

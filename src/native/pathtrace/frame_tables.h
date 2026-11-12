@@ -1150,6 +1150,9 @@ namespace remix::trace {
                          // Bit 26: a ray portal over an opaque surface (its MaterialInfo
                          // chains the portal extension): what it shows takes its albedo.
                          uint32_t(material.rayPortal != 0 && material.rayPortalOverOpaque) << 26 |
+                         // Bits 27-31: its view's chromatic aberration, in quarter
+                         // pixels of a 1920-wide output (viewEffects).
+                         uint32_t(std::min(31.f, std::round(material.chromaticAberration * 1920 * 4))) << 27 |
                          // remixapi_InstanceInfoCameraCullingEXT (bits 9-10): camera rays
                          // skip its back faces / its parts in clusters the camera cannot see.
                          uint32_t(surface.cameraCull & 3u) << 9;
