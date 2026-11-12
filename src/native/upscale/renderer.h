@@ -68,7 +68,7 @@ namespace remix::upscale {
                     VkExtent2D display, Backend backend = Backend::Fsr31, std::shared_ptr<Ngx> ngx = {},
                     uint32_t quality = 1, uint32_t rrPreset = 0);
     // viewEffects: the path tracer's per-pixel view effects (render resolution,
-    // R16F; PathTracer::Gpu::viewEffects), read when composite is told they are valid.
+    // RGBA16F; PathTracer::Gpu::viewEffects), read when composite is told they are valid.
     void configureComposite(VkRenderPass pass, VkImageView stableDepth, VkRenderPass tonemapPass,
                             VkImageView viewEffects);
     void selectFrame(uint32_t slot);

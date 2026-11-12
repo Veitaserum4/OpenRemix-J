@@ -285,15 +285,26 @@ typedef struct remixapi_InstanceInfoCameraOnlyEXT {
 // Optional MaterialInfo pNext (after its Opaque struct) on a material that
 // shows another view: a screen (remixapi_MaterialInfoScreenCameraEXT) or a
 // ray portal over an opaque surface. What it shows takes the effects of a
-// game's screen shader, applied to the final image where its pixels show:
-// chromaticAberration displaces the red channel right and the blue channel
-// left of the green by this fraction of the output's width (0 none, at most
-// 1/240); a neighbouring pixel lends its channel only where it shows such a
-// view too.
+// game's screen shader (Source's MonitorScreen, a Unity screen material):
+//  tint: multiplies the view, each channel 0..1 ({1, 1, 1}: none).
+//  saturation: mix(mean(c), c, saturation), the mean of the three channels
+//   (1: none, 0: grey; MonitorScreen's $saturation).
+//  contrast: mix(c, c * c, contrast) (0: none; MonitorScreen's $contrast).
+//  chromaticAberration: the red channel displaced right and the blue channel
+//   left of the green by this fraction of the output's width (0: none, at
+//   most 1/240); a neighbouring pixel lends its channel only where it shows
+//   such a view too.
+// Saturation and contrast apply to the displayed (SDR-encoded) colour, as a
+// game's shader sees its camera's image; with an HDR output, to the exposed
+// linear colour. Tint applies in the view's lighting, saturation, contrast and
+// the aberration to the final image (after upscaling).
 #define REMIXAPI_STRUCT_TYPE_MATERIAL_VIEW_EFFECTS_EXT ((remixapi_StructType)0x7fff1078)
 typedef struct remixapi_MaterialInfoViewEffectsEXT {
   remixapi_StructType sType;
   const void *pNext;
+  remixapi_Float3D tint;
+  float saturation;
+  float contrast;
   float chromaticAberration;
 } remixapi_MaterialInfoViewEffectsEXT;
 

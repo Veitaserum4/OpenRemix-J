@@ -34,7 +34,7 @@ namespace remix {
                                 VK_FORMAT_R16G16B16A16_SFLOAT};
     for (unsigned i = 0; i < 7; ++i)
       primary[i] = image(true, formats[i], i == 4 ? displayExtent : extent);
-    viewEffects = image(true, VK_FORMAT_R16_SFLOAT, extent);
+    viewEffects = image(true, VK_FORMAT_R16G16B16A16_SFLOAT, extent);
     VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PrimaryPush)};
     VkPipelineLayoutCreateInfo li{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                                   .setLayoutCount = 1,

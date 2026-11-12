@@ -625,8 +625,9 @@ namespace remix {
     const PrimaryDraw &primaryDraw(size_t i) const { return tables.primary(i); }
     std::unique_ptr<Image> primary[7];
     // Render resolution, written by the primary surface replacement pass: the
-    // chromatic aberration (pixels of a 1920-wide output) of the view a screen
-    // or portal shows at each pixel, 0 elsewhere. The final composite reads it
+    // effects of the view a screen or portal shows at each pixel (chromatic
+    // aberration in pixels of a 1920-wide output, saturation, contrast; w 1),
+    // 0 elsewhere. The final composite applies them
     // (remixapi_MaterialInfoViewEffectsEXT).
     std::unique_ptr<Image> viewEffects;
     bool viewEffectsValid = false;
