@@ -1152,6 +1152,10 @@ namespace remix::trace {
                          uint32_t(material.rayPortal != 0 && material.rayPortalOverOpaque) << 26 |
                          // Bit 27: what it shows takes view effects (gradient[1..3]).
                          uint32_t(material.viewEffects) << 27 |
+                         // Bit 28: multiplicative paint with a finish
+                         // (remixapi_MaterialInfoPaintFinishEXT): its roughness and
+                         // metalness replace its receiver's where it covers.
+                         uint32_t(surface.decal && detail::decalMode(b) != 0 && material.paintFinish) << 28 |
                          // remixapi_InstanceInfoCameraCullingEXT (bits 9-10): camera rays
                          // skip its back faces / its parts in clusters the camera cannot see.
                          uint32_t(surface.cameraCull & 3u) << 9;
