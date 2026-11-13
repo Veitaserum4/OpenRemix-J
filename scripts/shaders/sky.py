@@ -46,7 +46,11 @@ def slangc():
 
 
 def compile_numos(build_shaders, directory):
-    subprocess.run([sys.executable, '-I', str(NUMOS / 'tools/build_shaders.py'), '--slangc', slangc(), '--out',
+    py = sys.executable
+    if not (py.lower().endswith('python.exe') or py.lower().endswith('python')):
+        import shutil
+        py = shutil.which('python3') or shutil.which('python') or py
+    subprocess.run([py, '-I', str(NUMOS / 'tools/build_shaders.py'), '--slangc', slangc(), '--out',
                     str(directory), '--jobs', str(os.cpu_count() or 4)], check=True, stdout=subprocess.DEVNULL)
 
 

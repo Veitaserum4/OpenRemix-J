@@ -429,7 +429,7 @@ def embedded_data(generator, namespace):
 def process(backends, jobs=None):
     """Compiles every stage of the backends concurrently, one task per stage."""
     with tempfile.TemporaryDirectory() as temporary, \
-            ThreadPoolExecutor(max_workers=jobs or os.cpu_count() or 1) as pool:
+            ThreadPoolExecutor(max_workers=jobs or min(os.cpu_count() or 1, 4)) as pool:
 
         tasks = {(b, stage): pool.submit(compile_stage, b, stage, temporary)
                  for b in backends for stage in BACKENDS[b][2]}
