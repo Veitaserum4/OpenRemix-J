@@ -1290,6 +1290,7 @@ namespace remix {
 #endif
     auto &options = settings.trace;
     if (ui::Panel panel{"Exposure", ImGuiTreeNodeFlags_DefaultOpen}) {
+      ui::Checkbox("Prism tonemapping", &options.prism);
       ui::Checkbox("Automatic exposure", &options.autoExposure);
       ui::SliderFloat("Manual exposure", &options.exposure, .05f, 8.f, "%.2f", ImGuiSliderFlags_Logarithmic);
       ui::SliderFloat("Meter target", &options.autoExposureTarget, .02f, .6f, "%.3f");
