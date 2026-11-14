@@ -68,7 +68,10 @@ typedef struct remixapi_MaterialDirectSpecularEXT {
 // the receiver takes the paint's roughness and metalness (its constants and
 // maps) in place of its own, as under a wet film (blood, oil); the paint still
 // only tints its colour, and its normal is kept. Of stacked paint, the nearest
-// with a finish gives it. Without effect on other materials.
+// with a finish gives it. With remixapi_MaterialIridescenceEXT, the paint's
+// film (its strength, index and thickness, flow included) coats the
+// receiver's reflection too, as oil on a floor; structural applies to the
+// paint's own colour only. Without effect on other materials.
 #define REMIXAPI_STRUCT_TYPE_MATERIAL_INFO_PAINT_FINISH_EXT ((remixapi_StructType)0x7fff1079)
 typedef struct remixapi_MaterialInfoPaintFinishEXT {
   remixapi_StructType sType;
